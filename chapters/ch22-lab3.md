@@ -74,9 +74,12 @@ phantom-fill detector, and it is the most important assertion in the lab.
 
 The market data is `crash_bars()`: sixty deterministic minute bars
 sliding about 6.6%, no randomness, so the trip bar is reproducible. And
-`second_wave_bars()`: a second leg down *during* the halt, there to test
-the no-re-entry discipline. Deterministic fixtures are not a convenience
-here; they are the point. A fire drill you cannot replay is theater.
+`second_wave_bars()`: a second leg down *during* the halt — a 5.78%
+drop, deliberately above the trip threshold — there to test the
+no-re-entry discipline. The wave must be strong enough to trip a fresh
+kill; only the already-armed kill explains why nothing re-trips.
+Deterministic fixtures are not a convenience here; they are the point.
+A fire drill you cannot replay is theater.
 
 ## What you build: the wiring
 

@@ -93,6 +93,7 @@ from killswitch import (
     KillLevel,
     OperatorRegistry,
     HaltedError,
+    HeartbeatStale,
     KillAuthError,
 )
 
@@ -176,8 +177,15 @@ def crash_bars(n=60, start=100.0, end=93.4):
     ]
 
 
-def second_wave_bars(n=20, start=93.4, end=90.0):
-    """A second leg down DURING the halt — the no-re-entry test."""
+def second_wave_bars(n=20, start=93.4, end=88.0):
+    """A second leg down DURING the halt — the no-re-entry test.
+
+    The drop is (93.4 - 88.0) / 93.4 = 5.78%, deliberately above the 5%
+    trip threshold: the only reason drive_market reports tripped=False
+    for this wave is that the kill is ALREADY armed. A weaker wave would
+    let a missing armed-guard pass by never reaching the threshold at
+    all.
+    """
     step = (start - end) / n
     return [
         {"t": 100 + i, "close": round(start - step * i, 4), "synthetic": True}
