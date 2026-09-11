@@ -61,7 +61,22 @@ class SubmitOrderRequest(BaseModel):
       cannot be computed and the order is rejected.
     """
 
-    model_config = {"str_strip_whitespace": True, "extra": "forbid"}
+    model_config = {
+        "str_strip_whitespace": True,
+        "extra": "forbid",
+        # frozen: a validated contract is immutable. Nothing downstream —
+        # no retry loop, no "helpful" enrichment step — may mutate an order
+        # after the boundary has approved it. Mutation after validation is
+        # how a checked order becomes an unchecked one.
+        "frozen": True,
+        # strict: no silent type coercion. A string that looks like a
+        # number is not a number — that is the smuggling vector strict
+        # mode exists to close. The one exception is documented below:
+        # JSON's type system is poorer than ours, so JSON numbers
+        # (int/float) are converted to Decimal by an explicit,
+        # named validator — never by framework guesswork.
+        "strict": True,
+    }
 
     symbol: str
     side: OrderSide
@@ -78,6 +93,39 @@ class SubmitOrderRequest(BaseModel):
     #: but every agent-issued order should carry one, or debugging a rogue
     #: order and evaluating agent loops becomes a forensic exercise.
     trace_id: str | None = Field(default=None, max_length=128)
+
+    # -- explicit numeric coercion: the one exception to strict ----------
+
+    @field_validator(
+        "qty", "limit_price", "stop_price", "max_notional",
+        "reference_price", mode="before",
+    )
+    @classmethod
+    def decimal_fields_accept_json_numbers(cls, v):
+        """Name the coercion strict mode forbids.
+
+        The wire speaks JSON, and JSON has no Decimal: numbers arrive as
+        int or float. Strict mode rejects every coercion, including the
+        legitimate ones, so the boundary states its own: int/float become
+        Decimal; strings do NOT (``"10"`` for qty is malformed input, not
+        a quantity — string-to-number is exactly the coercion an injected
+        payload relies on); booleans are rejected even though ``bool``
+        subclasses ``int``, because ``True`` is not a quantity either.
+        Every allowed conversion is written here, in the open, instead of
+        being guessed by the framework.
+        """
+        if v is None or isinstance(v, Decimal):
+            return v
+        if isinstance(v, bool):
+            raise ValueError(f"boolean {v!r} is not a valid decimal amount")
+        if isinstance(v, int):
+            return Decimal(v)
+        if isinstance(v, float):
+            return Decimal(str(v))
+        raise ValueError(
+            f"expected a JSON number for a decimal field, "
+            f"got {type(v).__name__}"
+        )
 
     # -- field-level validators -----------------------------------------
 
@@ -193,7 +241,12 @@ class CancelOrderRequest(BaseModel):
     key, because "cancel, retry, cancel twice" must be a no-op, not a bug.
     """
 
-    model_config = {"str_strip_whitespace": True, "extra": "forbid"}
+    model_config = {
+        "str_strip_whitespace": True,
+        "extra": "forbid",
+        "frozen": True,   # a validated cancellation is immutable too
+        "strict": True,   # no silent coercion on the reversibility path either
+    }
 
     order_id: str = Field(min_length=1, max_length=64)
     idempotency_key: str = Field(min_length=8, max_length=64)
@@ -221,16 +274,19 @@ def tool_definition_for_planner() -> dict:
 
 if __name__ == "__main__":
     # -- one valid order ---------------------------------------------------
+    # NOTE: the payload uses int/float, not strings — that is what parsed
+    # JSON actually delivers. Strings for numeric fields are rejected
+    # (see decimal_fields_accept_json_numbers).
     good = validate_submit_order(
         {
             "symbol": "aapl",  # normalized to AAPL by the validator
             "side": "buy",
-            "qty": "10",
+            "qty": 10,
             "order_type": "limit",
-            "limit_price": "232.50",
+            "limit_price": 232.50,
             "time_in_force": "day",
             "idempotency_key": "alphaforge-2026-09-11-0001",
-            "reference_price": "231.80",
+            "reference_price": 231.80,
         }
     )
     print(f"VALID   {good.symbol} {good.side} {good.qty} @ {good.limit_price} "
@@ -242,27 +298,37 @@ if __name__ == "__main__":
         {
             "symbol": "MOON",
             "side": "buy",
-            "qty": "10",
+            "qty": 10,
             "order_type": "market",
             "idempotency_key": "alphaforge-2026-09-11-0002",
-            "reference_price": "12.00",
+            "reference_price": 12.00,
         },
         # 2. Notional over the cap: 500 shares x $231.80 = $115,900.
         {
             "symbol": "AAPL",
             "side": "buy",
-            "qty": "500",
+            "qty": 500,
             "order_type": "market",
             "idempotency_key": "alphaforge-2026-09-11-0003",
-            "reference_price": "231.80",
+            "reference_price": 231.80,
         },
         # 3. Missing idempotency key: a retry could double-fill.
         {
             "symbol": "AAPL",
             "side": "sell",
-            "qty": "5",
+            "qty": 5,
             "order_type": "market",
-            "reference_price": "231.80",
+            "reference_price": 231.80,
+        },
+        # 4. String where a number belongs: the smuggling vector strict
+        #    mode exists to close.
+        {
+            "symbol": "AAPL",
+            "side": "buy",
+            "qty": "10",
+            "order_type": "market",
+            "idempotency_key": "alphaforge-2026-09-11-0004",
+            "reference_price": 231.80,
         },
     ]
     for i, payload in enumerate(bad_payloads, start=1):

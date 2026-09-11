@@ -82,7 +82,22 @@ class SubmitOrderRequest(BaseModel):
       cannot be computed and the order is rejected.
     """
 
-    model_config = {"str_strip_whitespace": True, "extra": "forbid"}
+    model_config = {
+        "str_strip_whitespace": True,
+        "extra": "forbid",
+        # frozen: a validated contract is immutable. Nothing downstream —
+        # no retry loop, no "helpful" enrichment step — may mutate an order
+        # after the boundary has approved it. Mutation after validation is
+        # how a checked order becomes an unchecked one.
+        "frozen": True,
+        # strict: no silent type coercion. A string that looks like a
+        # number is not a number — that is the smuggling vector strict
+        # mode exists to close. The one exception is documented below:
+        # JSON's type system is poorer than ours, so JSON numbers
+        # (int/float) are converted to Decimal by an explicit,
+        # named validator — never by framework guesswork.
+        "strict": True,
+    }
 
     symbol: str
     side: OrderSide
@@ -99,6 +114,39 @@ class SubmitOrderRequest(BaseModel):
     #: but every agent-issued order should carry one, or debugging a rogue
     #: order and evaluating agent loops becomes a forensic exercise.
     trace_id: str | None = Field(default=None, max_length=128)
+
+    # -- explicit numeric coercion: the one exception to strict ----------
+
+    @field_validator(
+        "qty", "limit_price", "stop_price", "max_notional",
+        "reference_price", mode="before",
+    )
+    @classmethod
+    def decimal_fields_accept_json_numbers(cls, v):
+        """Name the coercion strict mode forbids.
+
+        The wire speaks JSON, and JSON has no Decimal: numbers arrive as
+        int or float. Strict mode rejects every coercion, including the
+        legitimate ones, so the boundary states its own: int/float become
+        Decimal; strings do NOT (``"10"`` for qty is malformed input, not
+        a quantity — string-to-number is exactly the coercion an injected
+        payload relies on); booleans are rejected even though ``bool``
+        subclasses ``int``, because ``True`` is not a quantity either.
+        Every allowed conversion is written here, in the open, instead of
+        being guessed by the framework.
+        """
+        if v is None or isinstance(v, Decimal):
+            return v
+        if isinstance(v, bool):
+            raise ValueError(f"boolean {v!r} is not a valid decimal amount")
+        if isinstance(v, int):
+            return Decimal(v)
+        if isinstance(v, float):
+            return Decimal(str(v))
+        raise ValueError(
+            f"expected a JSON number for a decimal field, "
+            f"got {type(v).__name__}"
+        )
 
     # -- field-level validators -----------------------------------------
 
@@ -222,6 +270,10 @@ Several decisions here are deliberate and worth naming, because each one is a sc
 
 **`extra="forbid"`.** Unknown fields are rejected. A model that adds `secret_backdoor: true` to the payload — whether through hallucination or prompt injection — gets a `ValidationError`, not a silently ignored field. Silently ignoring unknown fields is how injected instructions survive: the parser shrugs, the downstream code reads the one field the attacker cared about.
 
+**`frozen=True`.** A validated contract is immutable. Nothing downstream — no retry loop, no "helpful" enrichment step, no post-validation audit stamp — may mutate an order after the boundary has approved it, because mutation after validation is how a checked order becomes an unchecked one. If any stage needs a changed order, it builds a new contract and re-validates; there is no path from "approved" to "different but still approved."
+
+**`strict=True`, with one named exception.** Pydantic coerces by default, and silent coercion is a smuggling vector: a string that *looks* like a number is not a number, and `"10"` arriving for `qty` should be malformed input, not a quantity. Strict mode makes it a refusal. But strict is blunt — applied naively it also rejects the legitimate coercions, and the wire genuinely needs one: JSON has no Decimal, so real numbers arrive as int or float. The answer is not to relax strictness but to *name the exception*: `decimal_fields_accept_json_numbers` is a `mode="before"` validator that converts int/float to Decimal, rejects strings, and rejects booleans (even though `bool` subclasses `int`, `True` is not a quantity). Every allowed conversion is written in the open, in the contract file, instead of being guessed by the framework. Strict by default, explicit where the wire's type system is poorer than yours — that is the whole policy in one sentence.
+
 **Symbol allowlist, not a regex.** A regex validates shape; an allowlist validates authority. `^[A-Z]{1,5}$` would happily approve `MOON`. The desk approved six symbols. The schema knows which six.
 
 **The notional cap lives in the schema, not in a config file the planner can see.** This is the capability/authority split made concrete: the model may propose any quantity, but the maximum dollar size of a single order is not negotiable at planning time. It is a property of the contract.
@@ -249,7 +301,12 @@ class CancelOrderRequest(BaseModel):
     key, because "cancel, retry, cancel twice" must be a no-op, not a bug.
     """
 
-    model_config = {"str_strip_whitespace": True, "extra": "forbid"}
+    model_config = {
+        "str_strip_whitespace": True,
+        "extra": "forbid",
+        "frozen": True,   # a validated cancellation is immutable too
+        "strict": True,   # no silent coercion on the reversibility path either
+    }
 
     order_id: str = Field(min_length=1, max_length=64)
     idempotency_key: str = Field(min_length=8, max_length=64)
