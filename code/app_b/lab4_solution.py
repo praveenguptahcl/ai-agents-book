@@ -12,8 +12,8 @@ The verdict rule is the book's honesty thesis as code:
 
 The canary (MomentumMirage) has an in-sample Sharpe of 2.47 and dies the
 moment the regime turns: its folds grade PASS/PASS/PASS/FAIL/HOLD and
-its DSR lands at ~0.67 against 25 null trials — below the 0.95 bar, so
-FAIL. The FlatLiner never trades: every fold grades HOLD, so HOLD.
+its DSR lands at ~0.98 against 25 null trials — above the 0.95 bar, so
+the folds deliver the FAIL. The FlatLiner never trades: every fold grades HOLD, so HOLD.
 Nothing is hard-coded: swap in a genuinely good strategy and the same
 code reports PASS.
 

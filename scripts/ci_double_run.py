@@ -58,7 +58,7 @@ LABS = [
         "chapter": "ch20",
         "lab": "Lab 1 — Market-Data Evidence Pipeline",
         "test_file": "test_lab1_data.py",
-        "n_tests": 9,
+        "n_tests": 10,
         "key": "lab1_pipeline.py",
         "splice": {"copy_as": "pipeline.py"},
         "red": {"kind": "collection_error", "marker": "pipeline"},

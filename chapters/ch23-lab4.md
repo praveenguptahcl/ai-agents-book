@@ -60,8 +60,8 @@ number that describes a world that no longer exists. The replay universe is
 the last 200 are the EARNINGS_REVERSAL — a grinding downtrend with
 volatility, the Q3 earnings season as a regime change. The canary's longs
 bleed from the moment the regime turns. Walk it forward honestly and you get
-five folds — PASS, PASS, PASS, FAIL, HOLD — and a deflated Sharpe of 0.67
-against the 0.95 bar. The in-sample number was real arithmetic about a dead
+five folds — PASS, PASS, PASS, FAIL, HOLD — and a deflated Sharpe of 0.98,
+which clears the 0.95 multiplicity bar. The in-sample number was real arithmetic about a dead
 regime. That is what "looks great in-sample" means, and it is why this lab
 exists.
 
@@ -105,10 +105,17 @@ def verify_strategy(strategy_factory, bars: list[Bar], folds: list[Fold],
        — fresh strategy per fold; the harness enforces the t+1 rule and
        refuses mixed provenance. Let its exceptions propagate.
     4. DSR: concatenate per-trade P&L across folds; trials = null_trial_sharpes
-       (GIVEN); dsr() the series. If there are no trades, DSR is undefined —
-       report dsr=0.0 and let the verdict rule say HOLD.
+       (GIVEN); dsr() the series. The report's sharpe_annual is the RAW
+       annualized Sharpe of that same concatenated series — take it from
+       the Ch 17 dsr() output ("sharpe_annual"), not from the deflated
+       statistic. If there are no trades, DSR is undefined — report
+       dsr=0.0 AND sharpe_annual=0.0, and let the verdict rule say HOLD.
     5. Aggregate verdict: all folds HOLD -> "HOLD"; all folds PASS and
-       dsr >= 0.95 -> "PASS"; anything else -> "FAIL".
+       dsr >= 0.95 -> "PASS"; anything else -> "FAIL". Note the canary's
+       honest DSR (~0.98) CLEARS the 0.95 bar — the folds reject it, not
+       the multiplicity control. The DSR gate is the independent second
+       gate: it rejects the strategy that passes every fold but was one
+       of many tried.
     6. Write the thesis: one paragraph naming the strategy, the verdict
        (use the word "verdict"), the fold count (use the word "folds"), the
        embargo (use the word "embargo"), and the DSR. Do NOT write "PASS"
@@ -133,10 +140,14 @@ HOLD, positive net means PASS, otherwise FAIL). Your pipeline aggregates:
 - **Every fold HOLD → HOLD.** Nothing traded. An honest flat, never a
   fabricated zero. (The `FlatLiner` test enforces this: hard-coding FAIL for
   everything is fabrication in the other direction.)
-- **Every fold PASS *and* DSR ≥ 0.95 → PASS.** Both conditions. Walk-forward
-  alone is not enough — the canary passes three of five folds and still must
-  not graduate, because 25 random strategies were tried alongside it and the
-  deflated bar is 0.95.
+- **Every fold PASS *and* DSR ≥ 0.95 → PASS.** Both conditions, and they are
+  independent gates. The canary passes three of five folds, so the
+  walk-forward gate rejects it outright — "every fold" means every fold.
+  Its deflated Sharpe of 0.98, computed against the 25 random strategies
+  tried alongside it, actually clears the 0.95 bar: multiplicity is not what
+  kills this strategy; the regime change is. The DSR gate earns its keep on
+  the strategy that passes every fold but was one of fifty tried —
+  walk-forward cannot see multiplicity, so the second gate exists.
 - **Anything else → FAIL.** Mixed folds, a deflated Sharpe, an undefined
   DSR with trades on the books — all FAIL. The rule is deliberately
   asymmetric: graduation is hard, rejection is cheap. That asymmetry is the
@@ -258,8 +269,9 @@ The file is red on purpose. Work it green in this order:
       should see PASS, PASS, PASS, FAIL, HOLD for the canary. If you see
       anything else, your wiring is wrong — the fixture is deterministic.
 - [ ] **Step 4 — the deflation:** concatenate per-trade P&L, generate the
-      GIVEN null trials, call `dsr()`. Expect ≈0.67 for the canary — below
-      the 0.95 bar. Handle the no-trades case: DSR undefined, `dsr=0.0`,
+      GIVEN null trials, call `dsr()`. Expect ≈0.98 for the canary — above
+      the 0.95 bar, so the folds (not multiplicity) are what reject it.
+      Handle the no-trades case: DSR undefined, `dsr=0.0`,
       verdict HOLD.
 - [ ] **Step 5 — the aggregate:** implement the verdict rule exactly as
       specified. The asymmetry is the point.

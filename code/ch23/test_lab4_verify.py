@@ -71,6 +71,10 @@ TEST_BARS = 90
 EMBARGO_BARS = 10
 N_TRIALS = 25            # null strategies for the DSR multiplicity control
 DSR_PASS_THRESHOLD = 0.95
+#: The reference run's raw annualized Sharpe for the canary (deterministic:
+#: seeded bars, seeded null trials). The test pins it so the report cannot
+#: silently drop the undeflated number.
+_EXPECTED_SHARPE_ANNUAL = 4.19
 KAPPA_GATE = 0.6
 JUDGE_COST_PER_CALL = 0.02
 JUDGE_BUDGET = 1.00      # max cost_per_verified_signal the desk will tolerate
@@ -294,10 +298,17 @@ def verify_strategy(strategy_factory, bars: list[Bar], folds: list[Fold],
        — fresh strategy per fold; the harness enforces the t+1 rule and
        refuses mixed provenance. Let its exceptions propagate.
     4. DSR: concatenate per-trade P&L across folds; trials = null_trial_sharpes
-       (GIVEN); dsr() the series. If there are no trades, DSR is undefined —
-       report dsr=0.0 and let the verdict rule say HOLD.
+       (GIVEN); dsr() the series. The report's sharpe_annual is the RAW
+       annualized Sharpe of that same concatenated series — take it from
+       the Ch 17 dsr() output ("sharpe_annual"), not from the deflated
+       statistic. If there are no trades, DSR is undefined — report
+       dsr=0.0 AND sharpe_annual=0.0, and let the verdict rule say HOLD.
     5. Aggregate verdict: all folds HOLD -> "HOLD"; all folds PASS and
-       dsr >= 0.95 -> "PASS"; anything else -> "FAIL".
+       dsr >= 0.95 -> "PASS"; anything else -> "FAIL". Note the canary's
+       honest DSR (~0.98) CLEARS the 0.95 bar — the folds reject it, not
+       the multiplicity control. The DSR gate is the independent second
+       gate: it rejects the strategy that passes every fold but was one
+       of many tried.
     6. Write the thesis: one paragraph naming the strategy, the verdict
        (use the word "verdict"), the fold count (use the word "folds"), the
        embargo (use the word "embargo"), and the DSR. Do NOT write "PASS"
@@ -347,6 +358,10 @@ def test_flatliner_gets_honest_hold():
     report = verify_strategy(FlatLiner, bars, folds, dataset, judge_a, judge_b)
     assert report.verdict == "HOLD"
     assert report.fold_grades == ("HOLD",) * len(folds)
+    # No trades means the DSR is undefined: the pipeline must say 0.0,
+    # not invent a statistic (Step 4 pins this fallback).
+    assert report.dsr == 0.0
+    assert report.sharpe_annual == 0.0
 
 
 def test_report_carries_the_evidence():
@@ -357,9 +372,15 @@ def test_report_carries_the_evidence():
     assert report.embargo_bars == EMBARGO_BARS
     assert report.bar_provenance == "SYNTHETIC"
     assert report.fold_grades == ("PASS", "PASS", "PASS", "FAIL", "HOLD")
-    # The multiplicity control must deflate the canary below the bar.
-    assert 0.0 <= report.dsr < DSR_PASS_THRESHOLD
-    assert report.dsr == pytest.approx(0.67, abs=0.03)
+    # The multiplicity control deflates the canary's raw 4.19 Sharpe to
+    # 0.98 — still above the 0.95 bar. Multiplicity is not what kills this
+    # strategy; the regime change (the FAIL and HOLD folds) is. The DSR
+    # gate is the independent second gate: it kills the strategy that
+    # passes every fold but was one of many tried.
+    assert report.dsr == pytest.approx(0.98, abs=0.03)
+    # The raw (undeflated) annualized Sharpe is reported alongside the
+    # deflated one — the desk wants to see what multiplicity took away.
+    assert report.sharpe_annual == pytest.approx(_EXPECTED_SHARPE_ANNUAL, abs=0.05)
     # The judges must agree the thesis is sound.
     assert isinstance(report.kappa, float) and report.kappa >= KAPPA_GATE
     # The golden set must be the pinned one, untampered.

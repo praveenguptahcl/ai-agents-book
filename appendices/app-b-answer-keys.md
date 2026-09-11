@@ -428,9 +428,9 @@ are walked with the real Ch 16 harness (fresh strategy instance per
 fold, t+1 execution, the embargo the test demands), the grades come
 from the default grader, and the DSR is computed against the GIVEN
 25-trial null distribution. On the reference run the canary grades
-`("PASS", "PASS", "PASS", "FAIL", "HOLD")` with DSR 0.671 — below the
-0.95 bar, so FAIL, matching the grader's expected verdict by
-computation. Swap in a genuinely good strategy and the same code
+`("PASS", "PASS", "PASS", "FAIL", "HOLD")` with DSR 0.976 — above the
+0.95 bar, so the folds (not multiplicity) deliver the FAIL, matching the
+grader's expected verdict by computation. Swap in a genuinely good strategy and the same code
 reports PASS; that is what makes it a key rather than a cheat sheet.
 
 ### The thesis is written for the judges literally

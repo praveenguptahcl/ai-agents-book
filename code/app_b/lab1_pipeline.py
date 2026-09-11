@@ -118,9 +118,14 @@ class QuotePipeline:
         """Emit in ``seq`` order, not arrival order. The wire reorders; the
         evidence must not.
 
-        Failures are NOT rolled back: quotes admitted before a bad one stay
-        admitted (they were valid), and the refusal propagates to the
-        caller. The ledger never contains a quote that failed validation.
+        A batch is a transaction: every quote is validated FIRST, and nothing
+        is emitted until all of them passed. One inadmissible quote fails the
+        entire batch, in either arrival order — emission is seq-ordered, so
+        "emit the valid ones, then raise" cannot be deterministic. The ledger
+        never contains a quote that failed validation, and never contains a
+        partial batch.
         """
         ordered = sorted(quotes, key=lambda q: q["seq"])
+        for q in ordered:
+            self._validate(q)
         return [self.ingest(q) for q in ordered]
