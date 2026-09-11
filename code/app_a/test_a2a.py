@@ -141,6 +141,28 @@ class TestAgentCards:
         assert any(v.rule == "card.security_scheme.not_exactly_one_kind"
                    for v in res.violations)
 
+    def test_rejections_name_the_targeted_protocol_version(self):
+        # §A.1 promises the validator "says so in every rejection".
+        card = good_card()
+        del card["description"]
+        res = validate_agent_card(card)
+        assert not res.ok
+        assert res.violations
+        assert all("(validator targets v1.0.0)" in v.detail
+                   for v in res.violations)
+
+    def test_03x_era_protocol_version_refused(self):
+        # A 0.3.x-era binding speaks a different wire protocol; the
+        # v1.0.0 validator refuses it loudly, naming its target.
+        card = good_card()
+        card["supportedInterfaces"][0]["protocolVersion"] = "0.3.0"
+        res = validate_agent_card(card)
+        assert not res.ok
+        assert any(v.rule == "card.interface.unsupported_protocol_version"
+                   for v in res.violations)
+        assert any("(validator targets v1.0.0)" in v.detail
+                   for v in res.violations)
+
     def test_apikey_scheme_bad_location(self):
         card = good_card()
         card["securitySchemes"]["k"] = {
@@ -150,6 +172,57 @@ class TestAgentCards:
         assert not res.ok
         assert any(v.rule == "card.security_scheme.apikey_bad_location"
                    for v in res.violations)
+
+    def test_http_scheme_missing_scheme_refused(self):
+        card = good_card()
+        card["securitySchemes"]["h"] = {"httpAuthSecurityScheme": {}}
+        res = validate_agent_card(card)
+        assert not res.ok
+        assert any(v.rule == "card.security_scheme.http_missing_scheme"
+                   for v in res.violations)
+
+    def test_apikey_scheme_missing_name_refused(self):
+        card = good_card()
+        card["securitySchemes"]["k"] = {
+            "apiKeySecurityScheme": {"location": "header"}
+        }
+        res = validate_agent_card(card)
+        assert not res.ok
+        assert any(v.rule == "card.security_scheme.apikey_missing_name"
+                   for v in res.violations)
+
+    def test_oidc_scheme_missing_url_refused(self):
+        card = good_card()
+        card["securitySchemes"]["o"] = {"openIdConnectSecurityScheme": {}}
+        res = validate_agent_card(card)
+        assert not res.ok
+        assert any(v.rule == "card.security_scheme.oidc_missing_url"
+                   for v in res.violations)
+
+    def test_oauth2_scheme_bad_flows_refused(self):
+        # Exactly one flow type: zero flows is as illegal as two.
+        bad = [
+            {},
+            {"authorizationCode": {"authorizationUrl": "https://x"},
+             "clientCredentials": {"tokenUrl": "https://x"}},
+        ]
+        for flows in bad:
+            card = good_card()
+            card["securitySchemes"]["o2"] = {
+                "oauth2SecurityScheme": {"flows": flows}
+            }
+            res = validate_agent_card(card)
+            assert not res.ok, flows
+            assert any(v.rule == "card.security_scheme.oauth2_flows"
+                       for v in res.violations), flows
+        # Exactly one flow type passes.
+        card = good_card()
+        card["securitySchemes"]["o2"] = {
+            "oauth2SecurityScheme": {
+                "flows": {"clientCredentials": {"tokenUrl": "https://x"}}
+            }
+        }
+        assert validate_agent_card(card).ok
 
     def test_malformed_signature_refused(self):
         card = good_card()
@@ -319,11 +392,18 @@ class TestTaskLifecycle:
         ]
         assert validate_task_lifecycle(transitions).ok
 
-    def test_terminal_states_are_exactly_the_spec_four(self):
-        assert TERMINAL_STATES == frozenset({
-            TaskState.COMPLETED, TaskState.FAILED,
-            TaskState.CANCELED, TaskState.REJECTED,
-        })
+    def test_terminal_states_refuse_every_transition(self):
+        # The old version of this test asserted TERMINAL_STATES equals
+        # its own literal — it verified the assignment operator. This one
+        # exercises behavior: no task leaves a terminal state, ever, not
+        # even to itself.
+        for state in (TaskState.COMPLETED, TaskState.FAILED,
+                      TaskState.CANCELED, TaskState.REJECTED):
+            for target in TaskState:
+                res = validate_task_lifecycle(
+                    [("t", state.value, target.value)])
+                assert not res.ok, (state, target)
+                assert res.violations[0].rule == "task.transition_from_terminal"
 
     def test_every_nonterminal_state_has_at_least_one_exit(self):
         for state, exits in ALLOWED_TRANSITIONS.items():

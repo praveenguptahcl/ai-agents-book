@@ -93,7 +93,10 @@ class ValidationResult:
 
     def fail(self, rule: str, path: str, detail: str) -> "ValidationResult":
         self.ok = False
-        self.violations.append(RuleViolation(rule, path, detail))
+        # §A.1's promise: the validator targets v1.0.0 and says so in
+        # every rejection. Warnings are not rejections; they keep quiet.
+        self.violations.append(
+            RuleViolation(rule, path, f"{detail} (validator targets v1.0.0)"))
         return self
 
     def warn(self, rule: str, path: str, detail: str) -> "ValidationResult":
@@ -185,6 +188,17 @@ def _validate_interface(iface: Any, path: str, res: ValidationResult) -> None:
     if not iface.get("protocolVersion"):
         res.fail("card.interface.missing_protocol_version", f"{path}.protocolVersion",
                  "protocolVersion is required on AgentInterface (§4.4.6)")
+    elif not str(iface["protocolVersion"]).startswith("1."):
+        # [BOOK RULE] The validator targets v1.0.0. A 0.3.x-era binding
+        # speaks a different wire protocol (lowercase method names, older
+        # card shape); it is refused loudly, never coerced. Note this is
+        # the interface's protocol version, not the card's agent "version"
+        # field — the agent's own version is free-form per §4.4.1 and is
+        # presence-checked only.
+        res.fail("card.interface.unsupported_protocol_version",
+                 f"{path}.protocolVersion",
+                 f"protocolVersion {iface['protocolVersion']!r} is not a v1.x "
+                 "binding; 0.3.x-era agents speak a different wire protocol (§A.1)")
 
 
 def _validate_skills(skills: list, card: dict, res: ValidationResult) -> None:

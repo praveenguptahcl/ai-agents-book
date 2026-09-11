@@ -296,8 +296,9 @@ presents names that scheme and is verified — outcome three, accepted.
 Then the task lifecycle does its work. The settlement task moves
 submitted → working, and the custodian's agent requests auth it had not
 declared — a `TASK_STATE_AUTH_REQUIRED` the card's schemes cannot satisfy.
-The transition itself is legal under the book's table (submitted →
-auth-required is an allowed edge), but the *demand* is not: the card
+The transition itself is legal under the book's table (working →
+auth-required is an allowed edge — the task was already in working when
+the demand arrived), but the *demand* is not: the card
 promised one authentication story and the task is telling another. The
 desk refuses the task (`task` transitions to rejected on the desk's side)
 and routes the card for human review. A card that passes every
@@ -327,8 +328,10 @@ JSON-RPC method names including `SendMessage` (§9); the
 **Book rules, not spec claims:** the allowed-transition table (§A.5) —
 the spec marks terminals but defines no transitions; the "extended card
 needs declared schemes" refusal; the "skill must not name undefined
-schemes" refusal; the "presented-but-unverified is rejected" policy. Each
-is labeled `[BOOK RULE]` in the code.
+schemes" refusal; the "presented-but-unverified is rejected" policy; the
+refusal of interface `protocolVersion` values outside v1.x (the card's
+agent `version` is the agent's own version per §4.4.1 and is
+presence-checked only). Each is labeled `[BOOK RULE]` in the code.
 
 **Assumed — check against the current spec before production use:** the
 exact JSON serialization of `SendMessageRequest` beyond the method name
