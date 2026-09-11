@@ -22,6 +22,8 @@ The Sharpe ratio — mean return divided by volatility — is the most quoted an
 
 **Lie three: multiple testing — the killer.** This is the one that murders careers. You test 250 strategies. Each is pure noise. What is the best Sharpe you expect to see? Not zero. With 250 draws from a Sharpe distribution with standard deviation 0.2, the expected *maximum* is about **0.57** — we will derive this below. So your "0.6 Sharpe strategy, discovered after testing 250 candidates" is not a discovery. It is the expected value of trying. Every backtest you have ever admired without asking "how many did they try?" is suspect until proven otherwise.
 
+*Figure: the three lies in one strip — identical Sharpes with opposite skew, the confidence band widening as the track record shortens, and the best-of-250 sitting at 0.57 under the null (one-line reference; full spec in `figs/ch17-figspec.md`).*
+
 ## The Probabilistic Sharpe Ratio
 
 Marcos López de Prado and David Bailey's Probabilistic Sharpe Ratio (2012) fixes lies one and two in a single formula. Instead of asking "what is the Sharpe ratio?", it asks the question you actually care about: **what is the probability that the true Sharpe ratio exceeds some benchmark, given the sample length, skew, and kurtosis?**

@@ -199,6 +199,8 @@ must reach kappa ≥ 0.6 on the thesis set before the judge's scores are
 allowed into the CI gate. Below that, the judge is not measuring thesis
 quality; it is measuring its own mood.
 
+*Figure: kappa vs raw agreement — the same judge pair at 80% raw agreement but kappa 0.615, and why the book reports kappa (one-line reference; full spec in `figs/ch15-figspec.md`).*
+
 Judge-vs-human agreement gets the same treatment on a sampled subset. The
 human is not ground truth either — humans disagree — but human-judge kappa
 tells you whether the judge's errors at least resemble human errors, which is
