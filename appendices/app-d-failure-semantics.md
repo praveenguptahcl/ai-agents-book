@@ -25,9 +25,9 @@ And one meta-pattern underlies all of them: the **saga** — the multi-step acti
 
 **Detect:** **the response never arrived within the deadline.** The observable signal is on your side of the boundary, not the broker's — you learn nothing about the broker's state from a timeout.
 
-**Pattern: idempotent retry with the same key, then hold for reconcile.** Mark the ledger row `timeout`, back off exponentially, and retry with the **identical idempotency key** — the broker's dedupe turns a retried submit into a lookup of the first attempt, so the retry is safe even if the first attempt actually landed. After the retry budget is exhausted, stop. The row stays in `timeout` status — an honest "unknown" — and `reconcile()` resolves it against the broker's authoritative state. Never let a timeout become a guess about what happened.
+**Pattern: idempotent retry with the same key, then hold for reconcile.** Mark the ledger row `timeout`, back off exponentially, and retry with the **identical idempotency key** — under the book's broker contract (Alpaca-paper-style dedupe, Ch 10), the retry hits the broker's dedupe and returns the existing order instead of creating a second one, so the retry is safe even if the first attempt actually landed. Portability note: some brokers reject a duplicate key with an error instead of returning the existing order — the executor must catch that specific rejection and read it as *confirmation* that the original attempt succeeded, not as a failure. After the retry budget is exhausted, stop. The row stays in `timeout` status — an honest "unknown" — and `reconcile()` resolves it against the broker's authoritative state. Never let a timeout become a guess about what happened.
 
-**Worked example (Ch 10's executor).** Order 3 of the AlphaForge morning batch: submit times out. The ledger records `mark_timeout` with the attempt count; the retry loop fires with the same key `alphaforge-…-<hash>`; the broker dedupes to the existing order and returns `accepted`; the row moves to `open`; `await_fill()` polls it to `filled`. If the retry budget had expired instead, the row would sit in `timeout` until the end-of-session sweep reconciled it. In no branch does anyone *assume* the order's state.
+**Worked example (Ch 10's executor).** Order 3 of the AlphaForge morning batch: submit times out. The ledger records `mark_timeout` with the attempt count; the retry loop fires with the same key `alphaforge-…-<hash>`; under the book's broker contract the broker dedupes to the existing order and returns `accepted` (a broker that rejects duplicate keys instead would return a duplicate-key error here, which the executor reads as confirmation); the row moves to `open`; `await_fill()` polls it to `filled`. If the retry budget had expired instead, the row would sit in `timeout` until the end-of-session sweep reconciled it. In no branch does anyone *assume* the order's state.
 
 **Never:** retry with a fresh key (that is how one timeout becomes two positions — Ch 10 § "Idempotency keys"), or retry immediately without backoff (that is how you turn one broker brownout into ten).
 
@@ -121,9 +121,76 @@ And one meta-pattern underlies all of them: the **saga** — the multi-step acti
 
 **Pattern: no special-casing — the intervention is just another world-state change, and the sweep reconciles it; the gate prevents the next submit.** This is the entry where the catalog's discipline matters most, because the temptation is to build a "human override" code path with its own semantics. Don't. The sweep adopts the broker's truth regardless of who changed it: the human-cancelled order becomes `cancelled` (terminal) in the ledger, exactly as a broker-cancelled order would. The *gate* is where the human's authority lives: the kill switch (Ch 11) sets a flag the executor checks before every submit — GuardedBroker refuses new sends while the switch is tripped, and re-arm requires two verified admins. The human does not reach into the transaction; the human operates the gate, and the transaction reconciles around it. The evidence log records both: the human's action (who, when, under what authority) and the sweep's adoption of its effects. That record is what makes the intervention auditable instead of mysterious.
 
-**Worked example.** During the morning batch, the risk officer trips the desk-scoped kill switch after order 3 — a headline just crossed. Orders 1–2 are `filled`; order 3 is `open`; orders 4–5 are never submitted (GuardedBroker refuses them). The sweep finds order 3 `filled` at the broker and closes the row. Meanwhile the risk officer, not trusting the sweep, cancels order 3 directly at the broker dashboard — a second intervention. The next sweep sees `cancelled` where the ledger said `filled`: the ledger adopts `cancelled`, the evidence trail records the operator's session as the cause, and the position feed is reconciled to match. The ledger is never "wrong" — it is a cache that caught up. When the headline clears, two admins lift the switch (Ch 11's two-person rule), and orders 4–5 are re-proposed as *new* decisions, because the world they were proposed into no longer exists.
+**Worked example.** During the morning batch, the risk officer trips the desk-scoped kill switch after order 3 — a headline just crossed. Orders 1–2 are `filled`; order 3 is `open`; orders 4–5 are never submitted (GuardedBroker refuses them). The risk officer, not trusting the sweep, cancels order 3 directly at the broker dashboard while it is still `open` — a second intervention. (The cancellation has to land while the order is `open`: a broker cannot cancel shares that are already `filled` — filled is terminal, and a catalog that forgets that is inventing broker behavior.) The next sweep sees `cancelled` where the ledger said `open`: the ledger adopts `cancelled` (terminal), the evidence trail records the operator's session as the cause, and the position feed is reconciled to match. The ledger is never "wrong" — it is a cache that caught up. When the headline clears, two admins lift the switch (Ch 11's two-person rule), and orders 4–5 are re-proposed as *new* decisions, because the world they were proposed into no longer exists.
 
 **Never:** let a human edit the ledger (that is how fraud is born — Ch 14), restart the agent to "clear" the intervention (that is how the 3am death becomes a 3:05am second death — Ch 14), or build an override path that bypasses the gate. The gate is the human's instrument; the ledger is the system's memory; neither reaches into the other.
+
+---
+
+## 9. Four modes covered by reference
+
+The consistency note names four Ch 10 modes with no dedicated entry above.
+That is deliberate: each one's handling pattern is identical to an entry
+already cataloged, and duplicating the pattern would imply a difference
+that does not exist. What follows is the complete handling for each —
+definition, detection, and the entry that governs it.
+
+### 9a. Duplicate submission
+
+**Definition.** The same proposal is submitted twice — operator double-click,
+duplicate message delivery, crash recovery re-firing the submit path.
+
+**Detect:** two submit attempts carrying the **same idempotency key**.
+
+**Pattern: entry 1 (Timeout).** The second submit is not an error; under the
+book's broker contract it is a lookup of the first attempt. The executor
+treats it exactly like a timeout retry: same key, read the broker's answer,
+adopt it. (Portability: a broker that rejects duplicate keys returns an
+error the executor reads as confirmation — entry 1's portability note.)
+
+### 9b. Accepted-not-yet-filled
+
+**Definition.** The broker accepted the order and has not filled it. This is
+not a failure — it is the normal intermediate state of every order that
+fills later.
+
+**Detect:** the broker's authoritative state is `accepted`/`open` with no
+fill quantity.
+
+**Pattern: entry 1's tail (hold for reconcile).** `await_fill()` polls to a
+deadline; past the deadline the row waits for the reconcile sweep. The
+failure this entry prevents is *misreading patience as malfunction*: never
+retry a submit that was accepted — a retry of an accepted order is how one
+order becomes two at brokers without dedupe.
+
+### 9c. Read-after-write race
+
+**Definition.** Your write succeeded, but the immediately following read does
+not show it — replica lag, read-your-write inconsistency on the broker's
+read path.
+
+**Detect:** a write acknowledged `accepted`, then a read within the
+replication window shows the pre-write state.
+
+**Pattern: entry 3 (Stale read).** The broker is the source of truth and the
+ledger is a cache — so a read that disagrees with your own acknowledged
+write is a stale cache, not a failed write. Re-read from the authoritative
+endpoint after the replication window; never re-submit on the basis of the
+stale read.
+
+### 9d. Reconcile-sweep failure
+
+**Definition.** The sweep itself fails — it crashes, or it cannot reach the
+broker. The meta-failure: the mechanism that resolves unknowns is
+temporarily unavailable.
+
+**Detect:** sweep errors, sweep timeouts, missing sweep heartbeats.
+
+**Pattern: the sweep is read-only, so its failure changes nothing at the
+broker.** Alert, back off, retry the sweep. Rows stay in their honest
+unknown states (`timeout`, ambiguous) until a sweep succeeds. What you must
+never do is mark rows by assumption to "clear" the backlog — that is entry
+4's (Ambiguous commit) unforgivable sin applied to the sweep itself.
 
 ---
 
