@@ -100,7 +100,7 @@ def verify_strategy(strategy_factory, bars: list, folds: list,
     # 5. The aggregate verdict. Note what it takes to PASS: EVERY fold
     #    green AND the multiplicity control cleared. Anything less is
     #    FAIL — including the canary's three green folds, because the
-    #    fourth fold and the DSR said no.
+    #    fourth fold said no, even though the DSR cleared the threshold.
     if all(g == "HOLD" for g in fold_grades):
         verdict = "HOLD"
     elif all(g == "PASS" for g in fold_grades) \

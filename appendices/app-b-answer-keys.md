@@ -25,14 +25,14 @@ modified — asserts the RED run fails in exactly the documented way
 every test fails on the `NotImplementedError` stubs; Lab 4: five stub
 failures plus the one documented passing trap,
 `test_in_sample_sharpe_is_seductive`), then splices the key in and
-asserts the GREEN run is fully green (9/10/8/6).
+asserts the GREEN run is fully green (10/10/8/6).
 
 ---
 
 ## B.1 Lab 1 — The Market-Data Evidence Pipeline
 
 **Key file:** `code/app_b/lab1_pipeline.py` — `QuotePipeline`, `MalformedQuote`,
-`UnlabeledData`, `UntrustedSource`. All 9 lab tests green.
+`UnlabeledData`, `UntrustedSource`. All 10 lab tests green.
 
 ### The decision the lab is really about: validation order
 
@@ -420,7 +420,8 @@ its DSR is reported as 0.0 with the explicit note that the DSR is
 *undefined* when there are no trades: a zero dressed up as a statistic
 is fabrication). PASS requires *every* fold green *and* the
 multiplicity control cleared — the canary's three green folds are not
-enough, because the fourth fold and the DSR said no. Everything else is
+enough, because the fourth fold said no, even though the DSR cleared the
+threshold (0.976 ≥ 0.95). Everything else is
 FAIL, including the seductive middle: good folds, bad statistics.
 
 Nothing is hard-coded. The canary's verdict is discovered: the folds
