@@ -3,7 +3,7 @@
 *Chapter 23. Part VII: Practice. The capstone lab.*
 
 Every trading desk has a graduation ritual — the gauntlet a strategy survives
-before it touches money, even paper money. At Meridian-style desks the ritual
+before it touches money, even paper money. At AlphaForge-style desks the ritual
 has a name whispered like a warning: *the walk-forward.* Most strategies do
 not survive it. That is the point.
 

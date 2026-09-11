@@ -5,7 +5,7 @@ must be tested the way the future actually arrives — one bar at a time, with
 no peeking. ``walk_forward()`` is the protocol; ``check_temporal_purity()``
 is the lie detector.
 
-Temporal invariants (Meridian discipline, enforced here, not suggested):
+Temporal invariants (AlphaForge discipline, enforced here, not suggested):
   - Strategies see only bars through the current bar, as fresh tuples.
     Peeking at bar t+1 while deciding on bar t is a ``TemporalViolation``.
   - An intent decided on bar t executes no earlier than bar t+1's open.

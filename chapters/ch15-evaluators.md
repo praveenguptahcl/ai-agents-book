@@ -135,7 +135,7 @@ class RealBarsOnlyGrader(DeterministicGrader):
 
     A trading thesis cites market bars. Any cited bar not labeled REAL is a
     validity failure — a thesis grounded in synthetic data presented as
-    history is fabrication, not analysis. (Meridian invariant: every bar
+    history is fabrication, not analysis. (AlphaForge invariant: every bar
     labeled REAL or SYNTHETIC; paper-trading honesty, Ch 2's Verify.)
     """
 ```
@@ -484,7 +484,7 @@ no grader in this chapter knows what "before" means.
 Chapter 16 gives the machinery a timeline. It folds history into
 train/validate/test segments separated by embargo gaps, proves the
 no-lookahead invariant (a signal decided on bar $t$ cannot execute before
-bar $t{+}1$'s open — the Meridian temporal rule, enforced by construction),
+bar $t{+}1$'s open — the AlphaForge temporal rule, enforced by construction),
 and scores each fold with the graders built here. The machinery you just
 read is the instrument; the next chapter is the procedure that keeps the
 instrument honest about time.

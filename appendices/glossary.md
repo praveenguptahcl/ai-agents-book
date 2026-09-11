@@ -85,14 +85,14 @@
 | Walk-forward | Walk-forward validation; rolling-origin evaluation | Temporal validation with an arrow: train on the past, embargo, test on the future, roll — never the reverse. | Ch 16 |
 | Embargo | Purge/embargo (cf. López de Prado's purged k-fold) | The mandatory gap between train and test windows, sized for autocorrelation — no information leaks across the boundary. | Ch 16 |
 | Lookahead | Lookahead bias; future leakage | The cardinal sin: a decision on bar *t* that peeked at bar *t+1*. The detector perturbs the smuggled future and watches the verdict change. | Ch 16 |
-| t+1 rule | (Book's statement of a standard execution constraint) | A signal decided on bar *t* cannot execute before bar *t+1*'s open — the Meridian invariant, enforced in code. | Ch 10, Ch 16 |
+| t+1 rule | (Book's statement of a standard execution constraint) | A signal decided on bar *t* cannot execute before bar *t+1*'s open — the AlphaForge invariant, enforced in code. | Ch 10, Ch 16 |
 | Regime-aware folds | Regime-conditional validation | Walk-forward folds cut at market-regime boundaries, not calendar quarters — the test windows respect the phenomenon. | Ch 16 |
 | In-sample / out-of-sample | In-sample vs out-of-sample (standard) | Metrics computed on the data the strategy was built on (lies) versus data it never saw (evidence). | Ch 16 |
 | HOLD | No-trade / abstain (decision theory) | The honest verdict of a fold that produces nothing tradeable — reported as HOLD, never as zero, never fabricated. | Ch 16 |
 | PSR | Probabilistic Sharpe Ratio (Bailey & López de Prado) | The probability the *true* Sharpe beats a benchmark, corrected for sample length, skew, and kurtosis. | Ch 17 |
 | DSR | Deflated Sharpe Ratio (Bailey & López de Prado) | PSR evaluated at the multiplicity-adjusted benchmark — the statistic that deflates "best of 250 tries" into "expected." | Ch 17 |
 | minTRL | Minimum track-record length (Bailey & López de Prado) | How long a track record must be before a Sharpe estimate means anything — the chapter works it by hand. | Ch 17 |
-| Zero-of-250-survive | (Book coinage for the honest-reporting discipline) | The Meridian validation result the book holds up as a *success of method*: 39 raw PASS, zero surviving DSR — the harness is honest, not broken. | Ch 17 |
+| Zero-of-250-survive | (Book coinage for the honest-reporting discipline) | The AlphaForge validation result the book holds up as a *success of method*: 39 raw PASS, zero surviving DSR — the harness is honest, not broken. | Ch 17 |
 
 ## 6. Multi-agent, frameworks, lifecycle
 
@@ -103,7 +103,7 @@
 | Veto-wins | Safety veto; fail-closed arbitration | The adjudication rule that a safety objection overrides any number of approvals — one veto stops the act. | Ch 8 |
 | Cycle guard | Cycle detection; recursion limit | The orchestrator's defense against delegation loops: A delegates to B delegates to A is refused, not debugged later. | Ch 8 |
 | Evidence quarantine | Quarantine; tainted-data isolation | Sub-agent evidence held aside until verified — unverified claims never enter the spine. | Ch 8 |
-| Framework adapter | Adapter pattern; wrapper / strangler fig | The trust boundary wrapped around an off-the-shelf framework (LangChain/LlamaIndex/AG2-style): five ordered checks on every call — registration, authority, contract, approval, output review. | Ch 18 |
+| Framework adapter | (Book coinage; nearest neighbors: adapter pattern, strangler-fig wrapper) | The trust boundary wrapped around an off-the-shelf framework (LangChain/LlamaIndex/AG2-style): five ordered checks on every call — registration, authority, contract, approval, output review. | Ch 18 |
 | Approval ticket | Capability ticket; single-use authorization | A payload-digest-bound, single-use, expiring grant for one high-risk action — a 100-share approval never covers 10,000 shares. | Ch 18 |
 | A2A | Agent-to-Agent protocol (A2A 1.0) | The agent-card / message-envelope / task-lifecycle protocol for agents talking to agents — validated, not assumed. | App A |
 | MCP | Model Context Protocol | The client/server transport the book's tools speak — implemented runnable in Ch 7, not described from slides. | Ch 7 |
@@ -114,4 +114,3 @@
 | Saga / compensating action | Saga pattern; compensating transaction (microservices) | The failure-semantics answer to partial completion: a long action is a sequence of steps, each with a named undo — the catalog lives in Appendix D. | App D |
 | REAL / SYNTHETIC | Data provenance labeling | Every bar, fill, and fixture is stamped with its origin: real-anchored market data is REAL, generated fills are SYNTHETIC — "look real" never means fabricated. | Ch 2, Ch 16 |
 
-*Least sure of: the "framework adapter" industry mapping — "adapter pattern" is the software-pattern name, but in the agent-framework world there is no standard term for a trust-boundary wrapper; "wrapper / strangler fig" is descriptive, not canonical. Flagged for verification. The EU AI Act article numbers cited in Ch 19's mapping table were stated from the drafter's knowledge and need a light verification pass before print.*

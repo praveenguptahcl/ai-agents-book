@@ -224,7 +224,7 @@ class RealBarsOnlyGrader(DeterministicGrader):
 
     A trading thesis cites market bars. Any cited bar not labeled REAL is a
     validity failure — a thesis grounded in synthetic data presented as
-    history is fabrication, not analysis. (Meridian invariant: every bar
+    history is fabrication, not analysis. (AlphaForge invariant: every bar
     labeled REAL or SYNTHETIC; paper-trading honesty, Ch 2's Verify.)
     """
 
