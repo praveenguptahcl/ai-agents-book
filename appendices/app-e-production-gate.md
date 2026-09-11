@@ -127,6 +127,8 @@ Build the bundle in CI from these sources and the certification becomes continuo
 
 The front-matter one-pager is the same nine gates in checklist form — the thing you print, pin to the wall, and walk through in a production review. The discipline of the review is the discipline of the code: for each gate, the system owner must *produce the artifact*, not describe it. "Show me the evidence spine config" beats "we have logging" the way a test beats a promise. When a gate fails, the remediation names the exact document to write — the review ends with a work list, not a feeling.
 
+*Figure: the nine-gate certification wall — all nine gates as a single printable checklist, each with its artifact and chapter anchor, feeding the `ships` traffic light (one-line reference; full spec in `figs/app-e-figspec.md`).*
+
 The Standard is versioned (`STANDARD_VERSION = "1.0"`, pinned in a test) because standards drift. When the book's second edition adds a gate — and it will, because the threat landscape will — the version bump forces every certified system to re-certify against the new bar. Certification is a timestamp, not a tattoo.
 
 ## What the Standard does not do

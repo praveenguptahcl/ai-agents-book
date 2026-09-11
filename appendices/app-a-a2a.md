@@ -79,6 +79,8 @@ you can fail *fast* on protocol violations; the book's other machinery —
 contracts (Ch 4), output review (Ch 12), tenant isolation (Ch 6) — is
 what you apply to the content that survives.
 
+*Figure: the A2A three-layer protocol stack — canonical data model at the bottom, abstract operations in the middle, protocol bindings on top; the validator checks the bottom layer, bindings are transport (one-line reference; full spec in `figs/app-a-figspec.md`).*
+
 ## A.3 The agent card: claims before conversation
 
 The card is the first thing you see and the least trustworthy thing you
@@ -206,6 +208,8 @@ can silently move a completed task back to working, the evidence your
 spine recorded was a draft, not a verdict. The stricter table is the
 price of treating a remote task's state as something you can build on.
 
+*Figure: the A2A task lifecycle with teeth — nine states, absorbing terminals, and the two illegal transitions (resurrection, skip) struck through in red (one-line reference; full spec in `figs/app-a-figspec.md`).*
+
 ## A.6 Authentication: presented is not verified
 
 The spec's auth rule is one sentence with teeth: the client must
@@ -261,6 +265,8 @@ the validator's job is to describe reality, not to forbid it. The warning
 says what to do instead: treat every response as untrusted, which is the
 Ch 12 posture applied to the whole counterparty.
 
+*Figure: the auth decision flowchart — four diamonds from "card declares schemes?" to accept, with presented-but-unverified highlighted as the rejection that matters (one-line reference; full spec in `figs/app-a-figspec.md`).*
+
 ## A.7 What this validator is not
 
 Every mechanism in this book ends with the sentence that bounds it, and
@@ -282,6 +288,8 @@ the credential, and then apply the book's full machinery to everything
 that crosses the wire. A counterparty that passes every check in
 `a2a_validate.py` has earned exactly one thing: the right to be
 scrutinized by the harder tests.
+
+*Figure: the boundary this appendix patrols — what the card claims (capability) on the left, what your side decides (authority) on the right, with only validated shape crossing between them (one-line reference; full spec in `figs/app-a-figspec.md`).*
 
 ## A.8 The counterparty worked example
 
