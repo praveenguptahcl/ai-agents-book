@@ -216,6 +216,38 @@ walk-forward in Lab 4 — inherits this guarantee. If you let one
 unlabeled quote through here, you have voided every warranty the
 rest of the book offers.
 
+## Why the harness is built this way
+
+Three design decisions in `test_lab1_data.py` are worth understanding,
+because each one is a lesson the book has been teaching:
+
+**Real machinery, not mocks.** The harness imports the actual Ch 7
+server, the actual Ch 9 router, and the actual Ch 6 session store. A
+mock server would let your pipeline pass against a fiction — and this
+lab exists to prove a *composition*, which a mock cannot witness. The
+cost is that your pipeline must satisfy the real contracts: the real
+JSON-RPC envelope shape, the real closed taxonomy, the real session
+verification. That cost is the lesson. In production, the composition
+is the system, and testing the pieces against doubles proves only that
+the doubles agree with you.
+
+**The adversarial fixtures are hand-built, not fetched.** The real
+wire always arrives labeled — Ch 7's server guarantees it. So the
+hostile quotes (unlabeled, untrusted, stale, scrambled) are
+constructed as dicts, standing in for every source that is *not* your
+wire: a compromised feed, a misconfigured proxy, a replayed capture.
+Your pipeline must not distinguish "quotes from fetch" from "quotes
+from fixtures" — it validates everything identically, because in
+production the pipeline cannot tell which quotes came down the honest
+wire either. Uniform suspicion is the design.
+
+**Time is injected.** The pipeline takes a `clock`, and the stale
+test drives it — no `sleep`, no flakiness. This is Chapter 15's
+discipline arriving early: a test that depends on wall-clock timing
+is a test that fails at 2am on the CI runner and passes on your
+laptop, and a lab about evidence integrity cannot afford a test suite
+that lies about its own results.
+
 ## Hints, not the answer
 
 - Start with the refusal paths. Write the three exception classes

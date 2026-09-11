@@ -116,7 +116,7 @@ Now the hostile one, from the same morning:
 ```json
 {"proposal_id": "sig-0004-deadbeef", "symbol": "GME", "side": "buy",
  "qty": 10, "confidence": 0.80, "reference_price": 24.00,
- "rationale": "meme momentum, retail flow accelerating"}
+ "rationale": "meme momentum"}
 ```
 
 Parse succeeds. Schema-check succeeds — every required field is present,
