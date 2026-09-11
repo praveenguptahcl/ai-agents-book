@@ -199,6 +199,71 @@ middle of the outage, the correct final answer is *I don't know yet*.
 The row carries the error that explains why. That is not an incomplete
 implementation. That is the implementation.
 
+## The composition is the product
+
+It is worth saying plainly why this lab grades the *wiring* and not the
+components. Every component you are composing passed its own adversarial
+test suite: the executor's 16 tests, the kill switch's 47. If testing
+components were sufficient, this lab would be unnecessary. It is
+necessary because components do not fail in production — *compositions*
+do, at the seams where two correct components meet.
+
+Three seams in this lab have each caused a real incident somewhere:
+
+**The wrap order.** `killswitch.guarded(wrap_broker(raw))` is not the
+same as `wrap_broker(killswitch.guarded(raw))`, and neither is the same
+as wrapping only one of them. The first translates transport failures
+into the executor's taxonomy and *then* gates at send time. The second
+gates a raw broker whose `TimeoutError` the executor's `except` clause
+was never written to catch — Chapter 10's anti-corruption layer exists
+because the first version of this book's own code got it wrong. The
+third — no guard at all — is the TOCTOU race from Chapter 11 with the
+serial numbers filed off: the gate was green, the thread yielded, the
+kill engaged, and the order hit the wire during the halt.
+
+**The scope threading.** The kill switch's `check` takes a scope, the
+executor's orders carry tenant identity in their metadata, and nothing
+in either component connects the two. That connection is *your* code —
+one argument, `scope=scope`, in `submit_intent`. Drop it and desk A's
+scoped kill becomes decoration: the gate checks the global kill, finds
+nothing armed, and submits straight through the halt. The test that
+catches this is test 2's mirror: desk A must be refused while desk B
+trades. A single missing keyword argument is the difference between
+surgical and decorative.
+
+**The heartbeat ownership.** The KillSwitch boots armed-by-default and
+knows nothing about your supervisor process. The heartbeat is not a
+component the kill switch provides; it is a promise *you* make, by
+calling `beat()` on a schedule, from a process that is not the agent.
+In this lab you beat once at wiring time and the tests run in
+milliseconds, so the promise is trivially kept. In production the
+promise is the whole game — Chapter 11's dead-man's-heartbeat section is
+the reason — and the lab's `HeartbeatStale` refusal exists so you have
+felt the shape of it before the 2am page.
+
+This is the lab's meta-lesson, and it generalizes beyond trading: when
+you adopt any agent framework (Chapter 18), the framework gives you
+components; the seams are still yours. Audit the seams.
+
+## Reading the audit log
+
+When all eight tests are green, do one more thing before you call the
+lab done: print `ctx["killswitch"].audit()` and read the afternoon as
+the operator lived it. It should tell a story in order — the trip with
+its written reason and measured drop, the refused submits, the
+single-admin lift refusals, the two-admin lift with its reason. If the
+story is incomplete or out of order, your wiring is right and your
+observability is wrong, and that is its own lesson: a kill switch whose
+audit log cannot reconstruct the incident is a kill switch the auditors
+will not accept (Chapter 19 will ask for this log by name).
+
+Notice what the audit log does *not* contain: heartbeats. Beats arrive
+every few seconds and would turn the log into noise; what matters — the
+stale refusals — surfaces in the executor's logs instead. Absence of
+evidence is not evidence of absence, except when the absence *is* the
+signal. The heartbeat design is one of the few places in this book where
+silence means something, and the audit log is built to respect that.
+
 ## Red to green: the checklist
 
 - [ ] Run the lab as shipped. Watch all eight tests fail at the fixture
