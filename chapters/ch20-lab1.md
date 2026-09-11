@@ -157,7 +157,13 @@ acknowledge** — and the clauses, pinned by the tests, are its law:
    only if it can produce this receipt.
 3. **`ingest_batch(quotes)`** emits in `seq` order, not arrival order.
    The wire reorders packets; the evidence must not reorder history.
-   Sort by sequence, then emit.
+   Sort by sequence, then emit. **Batches are atomic**: validate every
+   quote before emitting any. If one quote is refused, the whole batch
+   is refused and nothing lands. "Emit the good ones and raise" sounds
+   reasonable until you notice emission is `seq`-ordered: whether the
+   good quote lands before the exception fires would depend on where
+   the bad quote sorts. A contract that answers differently depending
+   on sort position is not a contract. All or nothing.
 4. **Shape first.** A quote is valid only if it carries `symbol`,
    `price`, `provenance`, `source`, `ts`, and `seq`, correctly typed.
    Anything else is `MalformedQuote`, and nothing is emitted. Shape is
@@ -196,14 +202,14 @@ acknowledge** — and the clauses, pinned by the tests, are its law:
 Clause 5 is the heart of the lab, so let it land. `test_unlabeled_quote_rejected` deletes the provenance label from a
 perfectly good quote and asserts two things: the pipeline raises
 `UnlabeledData`, and the audit log is *empty*. Not "emitted with a
-warning". Empty. And `test_mixed_batch_admits_only_the_valid` goes
-further: in a batch of two, the good quote lands and the unlabeled
-one leaves no trace — then it asserts that every entry in the log
-carries a valid provenance. That final assertion is the guarantee the
-whole desk relies on: **a downstream signal reading this log can
-trust that every quote in it survived validation**, because the only
-way in was through your pipeline, and your pipeline refuses the
-unlabeled.
+warning". Empty. And `test_mixed_batch_rejected_entirely` goes
+further: in a batch of two, the good quote does *not* land either —
+one inadmissible quote fails the entire batch, in either arrival
+order, and the log stays empty. The guarantee the whole desk relies
+on is: **a downstream signal reading this log can trust that every
+quote in it survived validation**, because the only way in was
+through your pipeline, and your pipeline refuses the unlabeled — not
+the unlabeled quote, the unlabeled *batch*.
 
 Why is this the canonical failure rather than, say, the malformed
 quote? Because malformation is an accident and mislabeling is a

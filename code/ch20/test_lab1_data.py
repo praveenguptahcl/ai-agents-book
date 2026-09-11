@@ -26,7 +26,11 @@ The contract your pipeline must satisfy (every test below pins one clause):
      entry's ``seq`` and ``entry_hash`` ARE the receipt — a signal may act
      on a quote only if it can produce this receipt.
   3. ``ingest_batch(quotes) -> list[dict]`` — emits in ``seq`` order, not
-     arrival order. The wire reorders; the evidence must not.
+     arrival order. The wire reorders; the evidence must not. Batches are
+     ATOMIC: validate every quote first; if any quote is refused, nothing
+     is emitted and the batch raises. "Emit the valid ones, then raise" is
+     not implementable — emission is seq-ordered, so the exception would
+     fire at a position that depends on the bad quote's sort rank.
   4. A quote is valid only if it carries ALL of: ``symbol``, ``price``,
      ``provenance``, ``source``, ``ts``, ``seq``. Missing or wrongly-typed
      fields → ``MalformedQuote``. Nothing is emitted.
@@ -165,7 +169,8 @@ def _entries(router):
 
 def test_happy_path_emits_evidence(pipeline, fetch, router):
     """fetch → validate → label → route → acknowledge."""
-    ack = pipeline.ingest(fetch("AAPL"))
+    quote = fetch("AAPL")
+    ack = pipeline.ingest(quote)
 
     # The acknowledgement IS the receipt: seq + entry hash, or it is not
     # evidence and no signal may act on it.
@@ -182,6 +187,11 @@ def test_happy_path_emits_evidence(pipeline, fetch, router):
     assert payload["provenance"] == "SYNTHETIC"  # the fixture never passes
     assert payload["source"] == TRUSTED_SOURCE  #     as real
     assert payload["stale"] is False
+    # Clause 9 pins the payload shape: the record must carry the quote's
+    # own values, mapped, not just the labels we checked above.
+    assert payload["price"] == quote["price"]
+    assert payload["seq"] == quote["seq"]
+    assert payload["quote_ts"] == quote["ts"]
 
 
 def test_unlabeled_quote_rejected(pipeline, fetch, router):
@@ -205,12 +215,26 @@ def test_empty_provenance_is_still_unlabeled(pipeline, fetch, router):
     assert _entries(router) == []
 
 
-def test_stale_quote_flagged_not_dropped(pipeline, fetch, router):
-    """A quiet feed is information. Dropping it would hide the outage."""
-    quote = fetch("NVDA")
-    quote["ts"] = time.time() - 3600.0  # an hour old against a 60s window
+def test_stale_quote_flagged_not_dropped(fetch, router, session):
+    """A quiet feed is information. Dropping it would hide the outage.
 
-    ack = pipeline.ingest(quote)
+    Time is injected, never read from the wall clock: the staleness
+    verdict must be deterministic, or the test asserts nothing about
+    the pipeline and everything about the machine's mood.
+    """
+    dummy_now = 100000.0
+    local = QuotePipeline(
+        fetch=fetch,
+        router=router,
+        session=session,
+        allowed_sources={TRUSTED_SOURCE},
+        freshness_seconds=60.0,
+        clock=lambda: dummy_now,
+    )
+    quote = fetch("NVDA")
+    quote["ts"] = dummy_now - 3600.0  # an hour old against a 60s window
+
+    ack = local.ingest(quote)
 
     entries = _entries(router)
     assert len(entries) == 1
@@ -238,6 +262,17 @@ def test_malformed_quote_rejected(pipeline, fetch, router):
     assert _entries(router) == []
 
 
+def test_wrongly_typed_quote_rejected(pipeline, fetch, router):
+    """Clause 4 says "correctly typed" — the test harness must prove it."""
+    quote = fetch("QQQ")
+    quote["price"] = "not-a-number"  # parses fine, proves nothing
+
+    with pytest.raises(MalformedQuote):
+        pipeline.ingest(quote)
+
+    assert _entries(router) == []
+
+
 def test_out_of_order_arrival_emitted_in_seq_order(pipeline, fetch, router):
     """The wire reorders. The evidence must not."""
     quotes = []
@@ -253,24 +288,31 @@ def test_out_of_order_arrival_emitted_in_seq_order(pipeline, fetch, router):
     assert emitted == [1, 2, 3]
 
 
-def test_mixed_batch_admits_only_the_valid(pipeline, fetch, router):
-    """Adversarial batch: the good quote lands, the bad ones leave no trace."""
+def test_mixed_batch_rejected_entirely(pipeline, fetch, router):
+    """A batch is a transaction: one inadmissible quote fails it entirely.
+
+    The old version of this test asserted that the good quote lands while
+    the batch raises — which only worked because the good quote's seq
+    sorted first. Had the bad quote sorted first, the raise would have
+    fired before anything was emitted, and the "admits only the valid"
+    contract would have been unimplementable. Emission is seq-ordered, so
+    "emit the valid ones, then raise" cannot be deterministic. Validate
+    everything first; emit only when everything passed.
+    """
     good = fetch("AAPL")
     good["seq"] = 1
     bad = fetch("MSFT")
     bad["seq"] = 2
     del bad["provenance"]  # the canonical failure, smuggled into a batch
 
-    with pytest.raises(UnlabeledData):
-        pipeline.ingest_batch([good, bad])
+    for order in ([good, bad], [bad, good]):
+        with pytest.raises(UnlabeledData):
+            pipeline.ingest_batch(order)
 
-    entries = _entries(router)
-    assert len(entries) == 1
-    assert entries[0]["payload"]["symbol"] == "AAPL"
-    # And the inadmissible quote is nowhere — a downstream signal reading
-    # this log can trust that every quote in it survived validation.
-    assert all(e["payload"].get("provenance") in ("REAL", "SYNTHETIC")
-               for e in entries)
+        # All or nothing, in either arrival order: nothing was emitted, so
+        # a downstream signal reading this log can trust that every quote
+        # in it survived validation.
+        assert _entries(router) == []
 
 
 def test_evidence_chain_survives_the_lab(pipeline, fetch, router):
