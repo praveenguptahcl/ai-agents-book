@@ -1,0 +1,55 @@
+# Lab double-run CI — the executable form of Appendix B's claim.
+#
+# Every lab chapter (20-23) ships RED (failing-first fixtures) with its
+# answer key in code/app_b/. This workflow runs scripts/ci_double_run.py,
+# which executes each lab's suite TWICE in isolated temp copies of the
+# code tree (the shipped tree is never mutated):
+#   1. as shipped  -> must fail in exactly the documented way (RED)
+#   2. with the Appendix B key spliced in -> every test must pass (GREEN)
+# The job fails if any lab deviates on either run.
+
+name: lab-double-run
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "code/ch2[0-3]/**"
+      - "code/app_b/**"
+      - "scripts/ci_double_run.py"
+      - "chapters/ch2[0-3]-*.md"
+      - "appendices/app-b-*.md"
+      - ".github/workflows/lab-double-run.yml"
+  pull_request:
+    paths:
+      - "code/ch2[0-3]/**"
+      - "code/app_b/**"
+      - "scripts/ci_double_run.py"
+      - "chapters/ch2[0-3]-*.md"
+      - "appendices/app-b-*.md"
+      - ".github/workflows/lab-double-run.yml"
+  workflow_dispatch:
+
+jobs:
+  double-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install lab dependencies
+        run: pip install pytest pydantic numpy
+
+      - name: Lab double-run (RED as shipped, GREEN with keys)
+        run: python scripts/ci_double_run.py --json double-run-report.json
+
+      - name: Upload double-run report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lab-double-run-report
+          path: double-run-report.json

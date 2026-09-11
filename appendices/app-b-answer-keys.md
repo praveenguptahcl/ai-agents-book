@@ -17,7 +17,15 @@ import their GIVEN fixtures from the lab test modules themselves
 (single source of truth, no duplicated fixtures); splice the key into
 the lab directory the way your CI would and run the suite. The repo's
 CI runs each lab's tests twice: once as shipped (must be red) and once
-with the key (must be green).
+with the key (must be green). The harness is `scripts/ci_double_run.py`
+(wired into CI at `.github/workflows/lab-double-run.yml`): it copies the
+`code/` tree to a temp dir for each run — the shipped labs are never
+modified — asserts the RED run fails in exactly the documented way
+(Lab 1: collection error for the missing `pipeline` module; Labs 2–3:
+every test fails on the `NotImplementedError` stubs; Lab 4: five stub
+failures plus the one documented passing trap,
+`test_in_sample_sharpe_is_seductive`), then splices the key in and
+asserts the GREEN run is fully green (9/10/8/6).
 
 ---
 
