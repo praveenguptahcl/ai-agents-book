@@ -121,6 +121,12 @@ def check_temporal_purity(
     if not bars:
         raise WalkForwardError("purity check needs at least one bar")
     targets = list(decision_bars) if decision_bars is not None else [max(0, len(bars) - 2)]
+    # NOTE: the default targets bar len(bars)-2, never the last bar.
+    # _perturb_future only touches bars AFTER after_t; targeting the final
+    # bar would leave zero bars to perturb, and the smuggled dataset would
+    # be identical to the original — the lie detector would pass every
+    # cheating strategy silently. The default must always have future to
+    # perturb, or the check is a no-op wearing a lab coat.
     notes: list[str] = []
     failed = False
     inconclusive = False
