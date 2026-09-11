@@ -56,8 +56,13 @@ came from the operator.
 of exactly two levels, `PRINCIPAL` or `DATA`:
 
 ```python
-quote = TaggedText.data("paper_broker:quote", raw_quote_text)
-order = TaggedText.principal("operator", "Assess AAPL for tomorrow's session.")
+    @classmethod
+    def principal(cls, source: str, text: str) -> "TaggedText":
+        return cls(text=text, provenance=Provenance(source, Trust.PRINCIPAL))
+
+    @classmethod
+    def data(cls, source: str, text: str) -> "TaggedText":
+        return cls(text=text, provenance=Provenance(source, Trust.DATA))
 ```
 
 When the planner prompt is built, principal text goes in verbatim and DATA
@@ -66,6 +71,12 @@ the rule:
 
 ```python
 def render_planner_prompt(system_instruction: str, inputs: list[TaggedText]) -> str:
+    """Build the planner prompt: principal text verbatim, DATA quoted.
+
+    This is the whole of defense 1. It does not detect anything — it
+    *structures* the context so that instruction and data never share the
+    same unmarked stream.
+    """
     parts = [system_instruction.strip(), ""]
     for t in inputs:
         if t.provenance.trust is Trust.PRINCIPAL:
@@ -98,9 +109,16 @@ The model proposes; deterministic code disposes. The proposal is a
 fields — enforced by `_validate_proposal_shape` before anything else runs:
 
 ```python
-_INTENT_ACTIONS = frozenset({"hold", "propose_signal"})
-
 def _validate_proposal_shape(proposal: dict) -> tuple[bool, str]:
+    """Defense 2: the planner/executor split. The proposal is a closed
+    vocabulary — anything outside it is not a proposal, it is noise.
+
+    Type and size discipline applies to EVERY key, for EVERY action —
+    including hold. "Hold is always well-formed" used to mean the gate
+    waved holds through unchecked; an attacker could force the model to
+    emit a hold carrying a 10 MB malicious rationale and poison the state
+    or the logs. A hold is still always *permitted*; it is just never
+    *unchecked*."""
     if not isinstance(proposal, dict):
         return False, f"proposal is {type(proposal).__name__}, not a dict"
     unknown = set(proposal) - _PROPOSAL_KEYS
@@ -109,11 +127,26 @@ def _validate_proposal_shape(proposal: dict) -> tuple[bool, str]:
     action = proposal.get("action")
     if not isinstance(action, str) or action not in _INTENT_ACTIONS:
         return False, f"action {action!r} not in {_INTENT_ACTIONS}"
-    # ... every field is then type- and size-checked — including hold's ...
+    symbol = proposal.get("symbol")
+    if symbol is not None and (not isinstance(symbol, str) or len(symbol) > _MAX_SYMBOL_LEN):
+        return False, f"symbol must be a str of <= {_MAX_SYMBOL_LEN} chars"
+    side = proposal.get("side")
+    if side is not None and (not isinstance(side, str) or side not in _INTENT_SIDES):
+        return False, f"side {side!r} not in {_INTENT_SIDES}"
+    rationale = proposal.get("rationale")
+    if rationale is not None and (
+        not isinstance(rationale, str) or len(rationale) > _MAX_RATIONALE_LEN
+    ):
+        return False, f"rationale must be a str of <= {_MAX_RATIONALE_LEN} chars"
     if action == "hold":
         return True, "hold: shape valid (fields type- and size-checked)"
-    # ... propose_signal requires a non-empty symbol, a known side,
-    # and a non-empty rationale ...
+    if not isinstance(symbol, str) or not symbol.strip():
+        return False, "propose_signal requires a non-empty symbol"
+    if proposal.get("side") not in _INTENT_SIDES:
+        return False, f"side {proposal.get('side')!r} not in {_INTENT_SIDES}"
+    if not isinstance(rationale, str) or not rationale.strip():
+        return False, "propose_signal requires a non-empty rationale"
+    return True, "shape valid"
 ```
 
 This is the Chapter 4 discipline reused at a higher level, and it is the
@@ -143,14 +176,17 @@ and fails closed — anything but `hold` waits for a human to read the
 flagged sources:
 
 ```python
-flagged = [t.provenance.source for t in inputs if scan_for_injection(t)]
-if flagged and action != "hold":
-    return Verdict(
-        False,
-        "tainted context: untrusted input carries instruction-override "
-        f"markers (sources: {flagged}); failing closed to hold",
-        tuple(flagged),
-    )
+        # Gate 3 — tripwire. If any DATA input carries override markers, the
+        # turn is tainted. Hold is always safe; anything else waits for a
+        # human to read the flagged sources.
+        flagged = [t.provenance.source for t in inputs if scan_for_injection(t)]
+        if flagged and action != "hold":
+            return Verdict(
+                False,
+                "tainted context: untrusted input carries instruction-override "
+                f"markers (sources: {flagged}); failing closed to hold",
+                tuple(flagged),
+            )
 ```
 
 `hold` is always permitted, because doing nothing loudly is the safe

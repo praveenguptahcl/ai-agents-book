@@ -52,31 +52,49 @@ The live artifact for this chapter is `tenant.py`, runnable as-is. It has five m
 
 **A note on replay: the nonce is not a shield.** The token carries a random nonce, and it is tempting to read replay protection into it. There is none. The nonce exists only so two tokens minted in the same second are not identical strings; `verify` does not track used nonces, so the token is a standard bearer token and a stolen one replays until it expires. The defenses are a short TTL — minutes, not hours, for trading sessions (the module's 3600-second default is a ceiling for long-lived research sessions, not a recommendation) — and TLS in transit so the token is never observable on the wire. Revocation is the emergency brake, and it fails closed on the next call.
 
-Here is the complete module:
+Here is the trust boundary, in the order it executes. First, the authority model — the error family (every isolation failure is a `TenantError`, so callers catch the family, not the enumeration), the scope lattice, and the frozen session:
 
 ```python
-"""Tenant isolation for the AlphaForge / WealthForge agent team. (abridged
-in prose; the full runnable module is code/ch06/tenant.py)"""
-
-from __future__ import annotations
-
-import functools
-import hashlib
-import hmac
-import re
-import secrets
-import time
-from dataclasses import dataclass
+class TenantError(Exception):
+    """Base class for all tenant-isolation failures."""
 
 
-class TenantError(Exception): ...
-class TokenInvalid(TenantError): ...
-class TokenExpired(TenantError): ...
-class TenantRevoked(TenantError): ...
-class UnknownTenant(TenantError): ...
-class ScopeDenied(TenantError): ...
-class TenantMismatch(TenantError): ...
-class QuotaExceeded(TenantError): ...
+class TokenInvalid(TenantError):
+    """The token is malformed or its signature does not verify."""
+
+
+class TokenExpired(TenantError):
+    """The signature is valid but the token's expiry has passed."""
+
+
+class TenantRevoked(TenantError):
+    """The tenant is registered but has been revoked (offboarded,
+    compromised). Fails closed on the next call, not the next deploy."""
+
+
+class UnknownTenant(TenantError):
+    """No such tenant is registered with this store."""
+
+
+class ScopeDenied(TenantError):
+    """The session's scopes do not permit the requested action."""
+
+
+class TenantMismatch(TenantError):
+    """The action targets a different tenant than the session's. This is
+    the confused-deputy alarm: someone is trying to spend tenant B's
+    authority on tenant A's intent (or vice versa)."""
+
+
+class QuotaExceeded(TenantError):
+    """The tenant burned through its rate quota for this window."""
+
+
+# ---------------------------------------------------------------------------
+# Scopes: hierarchical least privilege. A broader scope implies the
+# narrower ones, so the execution agent's "submit" token can also read,
+# but the research agent's "read" token can never submit.
+# ---------------------------------------------------------------------------
 
 _SCOPE_IMPLICATIONS = {
     "read": frozenset({"read"}),
@@ -98,6 +116,8 @@ class Tenant:
 
 @dataclass(frozen=True)
 class TenantSession:
+    """A verified session. Frozen, because a session that can be mutated
+    after verification is a session that can be escalated."""
     token: str
     tenant_id: str
     scopes: frozenset
@@ -109,44 +129,75 @@ class TenantSession:
         for scope in self.scopes:
             implied |= _SCOPE_IMPLICATIONS.get(scope, set())
         return action in implied
+```
 
+Then issuance — minting the signed token — and verification, the check that runs on *every* call:
 
-class TenantStore:
-    def __init__(self, secret: bytes, clock=time.time):
-        if len(secret) < 16:
-            raise ValueError("secret must be at least 16 bytes")
-        self._secret = secret
-        self._clock = clock
-        self._tenants: dict[str, Tenant] = {}
-
-    def register(self, tenant_id, name, quota_per_minute=60) -> Tenant: ...
-    def get(self, tenant_id) -> Tenant: ...
-    def revoke(self, tenant_id) -> None: ...
-
-    def issue(self, tenant_id, scopes=("read",), ttl_seconds=3600.0) -> TenantSession:
+```python
+    def issue(
+        self,
+        tenant_id: str,
+        scopes=("read",),
+        ttl_seconds: float = 3600.0,
+    ) -> TenantSession:
         tenant = self.get(tenant_id)
         if tenant.revoked:
             raise TenantRevoked(f"tenant {tenant_id!r} is revoked")
         scopes_set = frozenset(scopes)
+        unknown = set(scopes_set) - set(_SCOPE_IMPLICATIONS)
+        if unknown:
+            raise ValueError(f"unknown scopes: {sorted(unknown)}")
         now = self._clock()
         iat, exp = int(now), int(now + ttl_seconds)
-        nonce = secrets.token_hex(8)  # uniqueness only -- NOT replay protection
-        payload = (f"{_TOKEN_VERSION}.{tenant_id}.{iat}.{exp}"
-                   f".{','.join(sorted(scopes_set))}.{nonce}")
+        # Uniqueness only: two tokens minted in the same second must not be
+        # identical strings. This is NOT replay protection -- the token is a
+        # bearer token, and a stolen token replays until it expires. The
+        # defenses against replay are a short TTL and TLS in transit.
+        nonce = secrets.token_hex(8)
+        payload = (
+            f"{_TOKEN_VERSION}.{tenant_id}.{iat}.{exp}"
+            f".{','.join(sorted(scopes_set))}.{nonce}"
+        )
         token = f"{payload}.{self._sign(payload)}"
-        return TenantSession(token, tenant_id, scopes_set, float(iat), float(exp))
+        return TenantSession(
+            token=token,
+            tenant_id=tenant_id,
+            scopes=scopes_set,
+            issued_at=float(iat),
+            expires_at=float(exp),
+        )
 
+    # -- verification: the check that runs on EVERY call ------------------
+```
+
+```python
     def verify(self, token_or_session) -> TenantSession:
-        token = (token_or_session.token
-                 if isinstance(token_or_session, TenantSession)
-                 else token_or_session)
+        """Verify a raw token string or a previously issued session.
+
+        Always re-verifies from the token bytes -- even a TenantSession
+        object is not trusted on its word, because the tenant may have
+        been revoked since it was issued.
+        """
+        token = (
+            token_or_session.token
+            if isinstance(token_or_session, TenantSession)
+            else token_or_session
+        )
+        if not isinstance(token, str):
+            raise TokenInvalid("token must be a string")
         parts = token.split(".")
         if len(parts) != 7 or parts[0] != _TOKEN_VERSION:
             raise TokenInvalid("malformed token")
         _, tenant_id, iat_s, exp_s, scopes_csv, nonce, sig = parts
-        if not hmac.compare_digest(self._sign(".".join(parts[:6])), sig):
+        payload = ".".join(parts[:6])
+        # compare_digest: a plain == would leak, byte by byte, how much of
+        # an attacker's forged signature is correct (timing side channel).
+        if not hmac.compare_digest(self._sign(payload), sig):
             raise TokenInvalid("bad signature")
-        iat, exp = int(iat_s), int(exp_s)
+        try:
+            iat, exp = int(iat_s), int(exp_s)
+        except ValueError:
+            raise TokenInvalid("bad timestamps") from None
         if self._clock() > exp:
             raise TokenExpired(f"token for tenant {tenant_id!r} expired")
         tenant = self._tenants.get(tenant_id)
@@ -155,27 +206,54 @@ class TenantStore:
         if tenant.revoked:
             raise TenantRevoked(f"tenant {tenant_id!r} is revoked")
         scopes = frozenset(scopes_csv.split(",")) if scopes_csv else frozenset()
-        return TenantSession(token, tenant_id, scopes, float(iat), float(exp))
+        return TenantSession(
+            token=token,
+            tenant_id=tenant_id,
+            scopes=scopes,
+            issued_at=float(iat),
+            expires_at=float(exp),
+        )
+```
 
+And the binding at the action plane — the verified session threaded into the call, the order's tenant cross-checked against the session's:
 
-def require_tenant(store, token_or_session, action) -> TenantSession:
-    session = store.verify(token_or_session)
-    if not session.allows(action):
-        raise ScopeDenied(f"tenant {session.tenant_id!r} may not perform {action!r}")
-    return session
+```python
+def require_tenant(store: TenantStore, token_or_session, action: str) -> TenantSession:
+    """The single choke point. Verify the token, then check the scope.
 
+    Every tool call and every ledger write passes through here. There is
+    deliberately no "trusted internal caller" bypass: the bypass is where
+    the confused deputy lives.
+```
 
-def submit_as(session_or_token, store, order: dict, submit_fn):
+```python
+def submit_as(session_or_token, store: TenantStore, order: dict, submit_fn):
     """The action-plane binding (pairs with Chapter 10's executor).
 
-    The verified session is passed INTO submit_fn(session, order): the
-    executor resolves the tenant's own broker credentials from
-    session.tenant_id, so the capability follows the verified authority
-    instead of a singleton client."""
+    The order carries the tenant it was decided for; the session carries
+    the tenant acting now. If they differ, the call is refused. This is
+    what stops tenant A's agent from spending tenant B's buying power,
+    and what stops a confused deputy from laundering one tenant's intent
+    through another tenant's authority.
+
+    Call this *before* the executor in Chapter 10 ever sees the order:
+    authority is checked before capability is exercised, per the spine.
+
+    The verified session is passed *into* ``submit_fn(session, order)`` --
+    this is the second half of the binding. Checking authority is not
+    enough: the executor must also *route the capability* to the tenant's
+    own credentials (its paper-broker API key, resolved from
+    ``session.tenant_id`` -- e.g. a ``TenantNamespace`` holding per-tenant
+    secrets). A module-level singleton broker client underneath would
+    silently trade against the wrong account even with the authority
+    check green. Multiplexing the capability by the verified tenant id
+    closes that seam.
+    """
     session = require_tenant(store, session_or_token, "submit")
-    if order.get("tenant_id") != session.tenant_id:
+    order_tenant = order.get("tenant_id")
+    if order_tenant != session.tenant_id:
         raise TenantMismatch(
-            f"order targets tenant {order.get('tenant_id')!r} but session "
+            f"order targets tenant {order_tenant!r} but session "
             f"belongs to {session.tenant_id!r}"
         )
     return submit_fn(session, order)

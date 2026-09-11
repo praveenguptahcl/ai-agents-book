@@ -287,15 +287,36 @@ elided, `...` marks the cuts; the full function is
 `code/ch07/mcp_client.py`):
 
 ```python
-def check_tool_against_contract(tool, model):
+def check_tool_against_contract(tool: dict, model: type[BaseModel]) -> None:
+    """Raise ContractViolation unless the advertised inputSchema is
+    compatible with the local Pydantic contract: same required fields, and
+    every advertised property type matches the contract's."""
+    name = tool.get("name", "<unnamed>")
     schema = tool.get("inputSchema")
     if not isinstance(schema, dict):
-        raise ContractViolation(f"tool {name!r}: missing or malformed inputSchema")
-    ...
+        raise ContractViolation(
+            f"tool {name!r}: missing or malformed inputSchema")
+    if schema.get("type") != "object" or not isinstance(
+            schema.get("properties"), dict):
+        raise ContractViolation(
+            f"tool {name!r}: inputSchema must be an object schema")
+
+    contract = _contract_schema(model)
+    want_required = set(contract.get("required", []))
+    got_required = set(schema.get("required", []))
     if got_required != want_required:
-        raise ContractViolation(...)
+        raise ContractViolation(
+            f"tool {name!r}: required fields {sorted(got_required)} != "
+            f"contract {sorted(want_required)}")
+
+    want_props = contract.get("properties", {})
     for field, want_prop in want_props.items():
-        ...
+        got_prop = schema["properties"].get(field)
+        if not isinstance(got_prop, dict):
+            raise ContractViolation(
+                f"tool {name!r}: contract field {field!r} missing from "
+                f"advertised schema")
+        want_type, got_type = _leaf_type(want_prop), _leaf_type(got_prop)
         if want_type and got_type and want_type != got_type:
             raise ContractViolation(
                 f"tool {name!r}: field {field!r} advertised as {got_type!r}, "

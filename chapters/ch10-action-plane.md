@@ -91,32 +91,42 @@ One design note, because this is where the first version of this chapter was wro
 The full module is `code/ch10/action_executor.py` (stdlib + pytest only; ~200 lines). Its core loop is worth reading in full, because every line is a decision from the taxonomy above:
 
 ```python
-def execute(self, order, broker):
-    key = order["idempotency_key"]
+    def execute(self, order: dict, broker) -> dict:
+        """Execute one validated order. Returns the ledger record, which may
+        be terminal (filled/partial/rejected), ``open`` (accepted, fill
+        pending — drive it with await_fill), or still pending (timeout/
+        submitted — resolve with reconcile)."""
+        key = order["idempotency_key"]
 
-    prior = self.ledger.get(key)
-    if prior is not None:
-        if prior["status"] in TERMINAL:
-            return prior            # decided already; never resubmit
-        if prior["status"] in PENDING:   # submitted | timeout | open
-            resolved = self.reconcile_key(key, broker)  # ask first, submit never
-            if resolved is None or resolved["status"] != "abandoned":
-                return resolved     # open rows return here too: no resubmit
+        prior = self.ledger.get(key)
+        if prior is not None:
+            if prior["status"] in TERMINAL:
+                return prior  # decided already; never resubmit
+            if prior["status"] in PENDING:
+                # Ambiguous from a previous run: ask the broker first.
+                resolved = self.reconcile_key(key, broker)
+                if resolved is None or resolved["status"] != "abandoned":
+                    return resolved
+                # Broker never saw it (proven, past the settle window) —
+                # fall through and submit with the same key.
 
-    attempts = 0
-    while True:
-        attempts += 1
-        self.ledger.record_attempt(key, order, attempts)  # write-ahead: before the call
-        try:
-            response = broker(order, self.timeout)
-        except (BrokerTimeout, BrokerError) as exc:
-            self.ledger.mark_timeout(key, attempts, str(exc))
-            if attempts > self.max_retries:
-                return self.ledger.get(key)   # hold as 'timeout'; reconcile later
-            time.sleep(self.backoff * 2 ** (attempts - 1))
-            continue                          # SAME key — no duplicate possible
-        # Terminal fills/rejections land here; acceptances land in 'open'.
-        return self.ledger.apply_broker_response(key, response, attempts)
+        attempts = 0
+        while True:
+            attempts += 1
+            self.ledger.record_attempt(key, order, attempts)
+            try:
+                response = broker(order, self.timeout)
+            except (BrokerTimeout, BrokerError) as exc:
+                self.ledger.mark_timeout(key, attempts, f"{type(exc).__name__}: {exc}")
+                if attempts > self.max_retries:
+                    # Give up retrying; the order stays 'timeout' until
+                    # reconcile() resolves the ambiguity. Never guess.
+                    return self.ledger.get(key)
+                if self.backoff:
+                    time.sleep(self.backoff * 2 ** (attempts - 1))
+                continue  # retry with the SAME key — no duplicate possible
+            # Terminal fills/rejections land here; acceptances land in 'open'.
+            return self.ledger.apply_broker_response(key, response, attempts)
 ```
 
 Five things to notice. First, the terminal-key early return: calling `execute()` twice with the same order touches the broker exactly once — the second call is a ledger lookup. Second, the pending-key path reconciles *before* submitting, which is the "never resubmit on ambiguity" rule made executable — and `open` rows flow through the same path, so a double-click on an accepted order refreshes its state instead of resubmitting it. Third, `record_attempt` runs before `broker(...)` on every attempt — write-ahead, no exceptions. Fourth, the final line routes through `apply_broker_response`, which is where the synchronous-fill assumption dies: an acceptance becomes `open`, not `filled`, and the fill is observed later through `await_fill()` or the sweep. Fifth, the retry loop only catches `BrokerTimeout` and `BrokerError` — and that narrow clause is honest only because `wrap_broker` guarantees the universe of inputs at the boundary. Catching everything would turn programming bugs into phantom retries.

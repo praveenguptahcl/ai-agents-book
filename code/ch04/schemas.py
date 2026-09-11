@@ -214,6 +214,11 @@ def validate_submit_order(payload: dict) -> SubmitOrderRequest:
     return SubmitOrderRequest.model_validate(payload)
 
 
+def tool_definition_for_planner() -> dict:
+    """The JSON Schema the LLM sees when it decides what to emit."""
+    return SubmitOrderRequest.model_json_schema()
+
+
 if __name__ == "__main__":
     # -- one valid order ---------------------------------------------------
     good = validate_submit_order(

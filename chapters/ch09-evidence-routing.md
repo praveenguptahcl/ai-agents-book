@@ -69,60 +69,60 @@ Retention is where the three consumers diverge deliberately. The audit log keeps
 The full module is `code/ch09/evidence.py` (stdlib only: `hashlib`, `hmac`, `json`, `time`, `threading`, `secrets`, `copy`; ~330 lines). The core is the router's `emit` — the single choke point, now bound to the verified session rather than a bare string:
 
 ```python
-def emit(self, session, event_type: str, payload: dict) -> dict:
-    _session_tenant_id(session)  # fail fast: strings are not sessions
-    payload = dict(payload or {})
-    if event_type not in EVENT_TYPES:
-        # Fail closed: unknown evidence is still evidence. Flag it so the
-        # misconfiguration shows up in the very log it tried to bypass.
-        return self.audit._append(
-            session, event_type, payload, flagged=True)
-    entry = self.audit._append(session, event_type, payload)
-    if event_type in TRACE_TYPES:
-        self.trace._record(session, event_type, payload)
-    if event_type in EVAL_TYPES:
-        self.evalset._record(session, event_type, payload)
-    return entry
+    def emit(self, session, event_type: str, payload: dict) -> dict:
+        _session_tenant_id(session)  # fail fast: strings are not sessions
+        payload = dict(payload or {})
+        if event_type not in EVENT_TYPES:
+            # Fail closed: unknown evidence is still evidence. Flag it so the
+            # misconfiguration shows up in the very log it tried to bypass.
+            return self.audit._append(
+                session, event_type, payload, flagged=True)
+        entry = self.audit._append(session, event_type, payload)
+        if event_type in TRACE_TYPES:
+            self.trace._record(session, event_type, payload)
+        if event_type in EVAL_TYPES:
+            self.evalset._record(session, event_type, payload)
+        return entry
 ```
 
 And the audit log's write path — the one the agent can never call — with the lock, the HMAC, the dual clocks, and the serialization fallback:
 
 ```python
-def _append(self, session, event_type: str, payload: dict,
-            flagged: bool = False) -> dict:
-    tenant_id = _session_tenant_id(session)
-    with self._lock:  # the serialization choke point: seq, prev_hash,
-                      # and append are one atomic step
-        seq = len(self._entries)
-        prev = (self._entries[-1]["entry_hash"] if self._entries
-                else self.GENESIS)
-        ts = self._clock()
-        mono = time.monotonic()
-        record = dict(payload or {})
-        try:
-            entry_hash = self._hash_entry(
-                seq, ts, mono, tenant_id, event_type, record, prev)
-        except Exception:
-            # A payload that cannot be serialized is still evidence — of
-            # its own failure. Never silently drop it.
-            record = {_SERIALIZATION_FAILED: True,
-                      "raw_repr": repr(payload)}
-            entry_hash = self._hash_entry(
-                seq, ts, mono, tenant_id, event_type, record, prev)
-            flagged = True
-        entry = {
-            "seq": seq,
-            "ts": ts,
-            "mono": mono,
-            "tenant_id": tenant_id,
-            "event_type": event_type,
-            "payload": record,
-            "flagged": flagged,   # True when the router failed an event closed
-            "prev_hash": prev,
-            "entry_hash": entry_hash,
-        }
-        self._entries.append(entry)
-        return dict(entry)
+    def _append(self, session, event_type: str, payload: dict,
+                flagged: bool = False) -> dict:
+        tenant_id = _session_tenant_id(session)
+        with self._lock:  # the serialization choke point: seq, prev_hash,
+                          # and append are one atomic step
+            seq = len(self._entries)
+            prev = (self._entries[-1]["entry_hash"] if self._entries
+                    else self.GENESIS)
+            ts = self._clock()
+            mono = time.monotonic()
+            record = dict(payload or {})
+            try:
+                entry_hash = self._hash_entry(
+                    seq, ts, mono, tenant_id, event_type, record, prev)
+            except Exception:
+                # A payload that cannot be serialized is still evidence — of
+                # its own failure. Never silently drop it.
+                record = {_SERIALIZATION_FAILED: True,
+                          "raw_repr": repr(payload)}
+                entry_hash = self._hash_entry(
+                    seq, ts, mono, tenant_id, event_type, record, prev)
+                flagged = True
+            entry = {
+                "seq": seq,
+                "ts": ts,
+                "mono": mono,
+                "tenant_id": tenant_id,
+                "event_type": event_type,
+                "payload": record,
+                "flagged": flagged,   # True when the router failed an event closed
+                "prev_hash": prev,
+                "entry_hash": entry_hash,
+            }
+            self._entries.append(entry)
+            return dict(entry)
 ```
 
 The test suite (`test_evidence.py`, 29 tests) is organized as the failures each test prevents: tampered payloads, tampered hashes, keyless forgery attempts, re-attributed tenants, spoofed tenant strings, concurrent emits, truncated tails, unserializable payloads, direct writes, cross-tenant reads, unknown types, dropped events, unfrozen eval snapshots. Run it:

@@ -47,27 +47,25 @@ No shims, no wrappers that hide the wire. The exact call, for
 `openai>=1.40`:
 
 ```python
-from openai import OpenAI
-
-client = OpenAI()  # reads OPENAI_API_KEY from the environment
-
-resp = client.chat.completions.create(
-    model="gpt-4o-mini-2024-07-18",
-    messages=[
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": market_brief},
-    ],
-    response_format={
-        "type": "json_schema",
-        "json_schema": {
-            "name": "signal_proposal",
-            "schema": SIGNAL_SCHEMA,   # defined below
-            "strict": True,
-        },
-    },
-    temperature=0.2,
-)
-content = resp.choices[0].message.content  # a JSON string
+    def _call_model(self, user_content: str) -> str:
+        resp = self._client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            response_format=RESPONSE_FORMAT,
+            temperature=self.temperature,
+        )
+        message = resp.choices[0].message
+        refusal = getattr(message, "refusal", None)
+        if refusal:
+            # A refusal is a provider policy decision, not a format glitch:
+            # retrying the identical prompt will not help. Raise immediately
+            # with the refusal text preserved for the audit trail.
+            raise SchemaViolation(f"Provider refusal: {refusal}",
+                                  raw={"refusal": refusal})
+        return message.content or ""
 ```
 
 Three details matter. First, `response_format` with `"type":
@@ -106,20 +104,34 @@ documented in descriptions and enforced in `_check_bounds` (§5.4), not in
 the schema.
 
 ```python
-SIGNAL_SCHEMA = {
+SIGNAL_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "symbol":           {"type": "string",
-                             "description": "Ticker from the approved universe."},
-        "direction":        {"type": "string",
-                             "enum": ["long", "short", "flat"]},
-        "confidence":       {"type": "number",
-                             "description": "0 to 1 (range enforced locally)."},
-        "rationale":        {"type": "string",
-                             "description": "Non-empty (enforced locally)."},
-        "max_position_pct": {"type": "number",
-                             "description": "0 to 100 (range enforced locally)."},
+        "symbol": {
+            "type": "string",
+            "description": "Ticker from the approved trading universe.",
+        },
+        "direction": {
+            "type": "string",
+            "enum": ["long", "short", "flat"],
+            "description": "Proposed position direction.",
+        },
+        "confidence": {
+            "type": "number",
+            "description": "Model self-reported confidence, 0 to 1 "
+                           "(range enforced locally; strict mode has no ranges).",
+        },
+        "rationale": {
+            "type": "string",
+            "description": "One or two sentences explaining the proposal "
+                           "(non-empty enforced locally).",
+        },
+        "max_position_pct": {
+            "type": "number",
+            "description": "Maximum portfolio percent the proposer recommends, "
+                           "0 to 100 (range enforced locally).",
+        },
     },
     "required": ["symbol", "direction", "confidence",
                  "rationale", "max_position_pct"],
@@ -152,16 +164,29 @@ even express an out-of-range number or an empty string, so those are ours
 too. Our `validate_signal` adds the domain gates and the numeric bounds:
 
 ```python
-def validate_signal(raw, universe):
+def validate_signal(raw: Any, universe: Sequence[str]) -> SignalProposal:
+    """Parse + validate a decoded JSON object against the contract.
+
+    The universe allowlist is the anti-hallucination gate: a plausible
+    ticker that is not in the approved universe is rejected here, before
+    it can become a position.
+    """
     if not isinstance(raw, dict):
-        raise SchemaViolation(f"not a JSON object: {type(raw).__name__}",
+        raise SchemaViolation(f"response is not a JSON object: {type(raw).__name__}",
                               raw=raw)
-    problems = _check_bounds(raw)          # required fields, enums, ranges
-    if isinstance(raw.get("symbol"), str) and raw["symbol"] not in set(universe):
-        problems.append(f"symbol {raw['symbol']!r} not in approved universe")
+    problems = _check_bounds(raw)
+    symbol = raw.get("symbol")
+    if isinstance(symbol, str) and symbol not in set(universe):
+        problems.append(f"symbol {symbol!r} not in approved universe")
     if problems:
         raise SchemaViolation("; ".join(problems), raw=raw)
-    return SignalProposal(...)
+    return SignalProposal(
+        symbol=str(symbol),
+        direction=str(raw["direction"]),
+        confidence=float(raw["confidence"]),
+        rationale=str(raw["rationale"]).strip(),
+        max_position_pct=float(raw["max_position_pct"]),
+    )
 ```
 
 The universe allowlist is the fail-plausible gate. `AMZN` passes the
@@ -185,23 +210,38 @@ the JSON. The correct response is a bounded retry loop — bounded being the
 operative word:
 
 ```python
-def request_signal(self, market_brief):
-    attempts = []                           # per-call audit trail
-    for _ in range(self.max_retries + 1):   # default: 3 attempts
-        content = self._call_model(brief)   # raises on provider refusal
-        attempts.append(content)
-        try:
-            raw = json.loads(content)
-        except json.JSONDecodeError as exc:
-            last = SchemaViolation(f"not valid JSON: {exc}", raw=content)
-            continue
-        try:
-            proposal = validate_signal(raw, self.universe)
-        except SchemaViolation as exc:
-            last = exc
-            continue
-        return SignalResult(proposal=proposal, attempts=attempts)
-    raise last
+    def request_signal(self, market_brief: str) -> SignalResult:
+        """Ask the model for a signal proposal; retry on schema violation.
+
+        Returns a SignalResult: the validated proposal plus the ordered
+        per-call attempts list (caller-owned). Raises SchemaViolation
+        after max_retries+1 failed attempts; the exception carries the
+        last raw response. A provider refusal raises immediately.
+        """
+        user_content = (
+            f"Approved universe: {', '.join(self.universe)}.\n"
+            f"Market brief:\n{market_brief}\n"
+            "Respond with exactly one JSON object matching the schema."
+        )
+        attempts: List[Any] = []
+        last_exc: Optional[SchemaViolation] = None
+        for _ in range(self.max_retries + 1):
+            content = self._call_model(user_content)
+            attempts.append(content)
+            try:
+                raw = json.loads(content)
+            except json.JSONDecodeError as exc:
+                last_exc = SchemaViolation(
+                    f"response is not valid JSON: {exc}", raw=content)
+                continue
+            try:
+                proposal = validate_signal(raw, self.universe)
+            except SchemaViolation as exc:
+                last_exc = exc
+                continue
+            return SignalResult(proposal=proposal, attempts=attempts)
+        assert last_exc is not None
+        raise last_exc
 ```
 
 Why retry at all? Because transient format failures are common and cheap to
@@ -283,8 +323,10 @@ The centerpiece test scripts the exact fail-plausible attack:
 
 ```python
 def test_fail_plausible_ticker_rejected():
+    """The model invents 'AMZN' — plausible, real ticker, NOT in universe.
+    Schema-valid, confidence-valid, completely unauthorized. Must die here."""
     invented = json.dumps({
-        "symbol": "AMZN",            # plausible, real ticker, NOT in universe
+        "symbol": "AMZN",            # not in ("SPY", "QQQ")
         "direction": "long",
         "confidence": 0.91,
         "rationale": "AWS reacceleration narrative into earnings.",

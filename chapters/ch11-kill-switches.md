@@ -43,12 +43,27 @@ Third, level 4 revokes the broker API keys. This is the belt-and-suspenders that
 
 ## Scoped kills: halt the desk, not the firm
 
-The four levels are global by default — and global is a blunt instrument. When WealthForge's dividend-capture agent looped at 02:47, the momentum desk was trading perfectly good signals; a firm-wide halt would have punished the innocent desk for the guilty one's bug. So a kill can carry a scope:
+The four levels are global by default — and global is a blunt instrument. When WealthForge's dividend-capture agent looped at 02:47, the momentum desk was trading perfectly good signals; a firm-wide halt would have punished the innocent desk for the guilty one's bug. So a kill can carry a scope — `engage` takes it as a parameter:
 
 ```python
-ella = registry.issue("op-ella")  # verified OperatorSession, not a string
-switch.engage(KillLevel.PAUSE_INTENTS, [ella], "harbor loop",
-              scope=("tenant", "harbor"))
+    def engage(
+        self,
+        level: KillLevel | int,
+        sessions: list[OperatorSession],
+        reason: str,
+        scope=None,
+    ) -> dict:
+        """Arm a kill level. Level 4 needs two DISTINCT verified operator
+        sessions — never raw strings. ``scope`` narrows the kill to one
+        tenant or strategy; None means the whole firm.
+
+        Side effects (cancel opens, flatten, revoke keys) run once per
+        (scope, effect), in escalating order, and their outcomes land in
+        the audit log. A failed effect does NOT disarm the kill — the
+        state arms regardless, because a kill switch that fails to arm
+        when the broker's cancel endpoint flaps is worse than useless.
+        Effect functions receive the scope so they can target precisely.
+        """
 ```
 
 The semantics are deliberately narrow. A global kill governs every action. A scoped kill governs only actions carrying the same scope — `check("submit", scope=("tenant", "harbor"))` consults harbor's kill and the global kill, never beacon's. A scoped kill never leaks into unscoped actions either: the global submit path does not inherit a tenant's pause. Scopes compose: disarming the global kill leaves the scoped one armed, and each scope's side effects run once, targeted — the cancel effect receives the scope so it pulls harbor's opens, not the firm's.
@@ -126,38 +141,84 @@ Notice the recursion the policy avoids: there is no "emergency re-arm" override,
 The full module is `code/ch11/killswitch.py` (stdlib only; ~650 lines). The core is the gate — everything else is authority bookkeeping around it:
 
 ```python
-def check(self, action: str, scope=None) -> None:
-    _check_scope(scope)
-    level = self.level_for(scope)   # global kills govern all; scoped kills
-                                    # govern only their own scope
-    if action in ("read", "reconcile"):
-        return None                      # freezing is not resolving
-    if action == "cancel":
-        if level >= KillLevel.FULL_STOP:
-            raise HaltedError(...)       # state freeze: no effects at all
-        return None                      # levels 1-3 need cancel for cleanup
-    if action == "submit":
-        if level >= KillLevel.PAUSE_INTENTS:
-            raise HaltedError(...)       # kill armed: refused
-        if not self._heartbeat_fresh():
-            raise HeartbeatStale(...)   # supervisor dead: refused
-        return None
-    raise KillAuthError(f"unknown action: {action!r}")
+    def check(self, action: str, scope=None) -> None:
+        """Gate every effect. Actions: 'submit', 'cancel', 'reconcile', 'read'.
+
+        ``scope`` is the action's scope — ("tenant", id) or ("strategy",
+        id). A global kill applies to every action; a scoped kill applies
+        only to actions carrying the same scope.
+
+        reconcile/read always pass — freezing is not resolving. cancel
+        passes at levels 1-3 (it is the cleanup mechanism) and freezes
+        only at FULL_STOP. submit requires no armed kill AND a fresh
+        heartbeat, checked in that order.
+        """
+        _check_scope(scope)
+        level = self.level_for(scope)
+        if action in ("read", "reconcile"):
+            return None
+        if action == "cancel":
+            if level >= KillLevel.FULL_STOP:
+                raise HaltedError(
+                    f"cancel refused: {level.name} armed: "
+                    f"{self._describe_applicable(scope)}"
+                )
+            return None
+        if action == "submit":
+            if level >= KillLevel.PAUSE_INTENTS:
+                raise HaltedError(
+                    f"submit refused: kill {level.name} armed: "
+                    f"{self._describe_applicable(scope)}"
+                )
+            if not self._heartbeat_fresh():
+                raise HeartbeatStale(
+                    "submit refused: supervisor heartbeat stale or missing "
+                    f"(window {self._window}s) — trading stays dead until "
+                    "the supervisor beats again"
+                )
+            return None
+        raise KillAuthError(f"unknown action: {action!r}")
 ```
 
 And the binding into the Ch 10 executor has two positions with a strict division of labor — the early check *before* the write-ahead row, and the wrapper at the wire:
 
 ```python
-broker = killswitch.guarded(broker_adapter)  # gate re-checked at send time:
-                                             # the TOCTOU fix
+    def guarded(self, broker):
+        """Wrap the broker client so the gate is consulted at send time.
 
-def execute(self, order, broker, killswitch):
-    killswitch.check("submit")   # BEFORE record_attempt: a refused submit
-                                 # leaves no phantom ledger state
-    key = order["idempotency_key"]
-    ...
-    response = broker(order, timeout)  # guarded: check("submit") runs again,
-                                      # at the last possible instant
+        A ``check()`` before the ledger write keeps refused submits out of
+        the ledger — but between that check and the wire call, the kill
+        can engage. This wrapper re-checks ``submit`` at the last possible
+        instant, immediately before the broker is touched. ``lookup`` is
+        read-only truth and is never gated, even at FULL_STOP.
+        """
+        return GuardedBroker(self, broker)
+```
+
+The wrapper it returns re-checks the gate at the last possible instant:
+
+```python
+class GuardedBroker:
+    """The kill switch wrapped around the actual broker client.
+
+    The caller's early ``check("submit")`` (before the ledger write) keeps
+    refused submits out of the ledger — but the kill can engage in the gap
+    between that check and the wire call. This wrapper closes the TOCTOU
+    window: the gate is consulted at the last possible instant, immediately
+    before the broker is touched. ``lookup`` is read-only truth-seeking
+    and is never gated, even at FULL_STOP.
+    """
+
+    def __init__(self, killswitch: KillSwitch, broker):
+        self._kill = killswitch
+        self._broker = broker
+
+    def __call__(self, order: dict, timeout=None):
+        self._kill.check("submit")  # at send time — the TOCTOU fix
+        return self._broker(order, timeout)
+
+    def lookup(self, key: str):
+        return self._broker.lookup(key)  # reconcile reads: never gated
 ```
 
 The `RiskMonitor` tracks the peak, breaches at 3%, and engages as the system identity — holding a verified `OperatorSession` for `risk-monitor`, issued by the registry at construction. The `OperatorRegistry` issues and re-verifies those sessions (HMAC-signed, the Ch 6 discipline); in production the sessions are minted at the ingress gateway behind real authentication, which is why the kill switch takes the registry as a constructor argument rather than hardcoding names — the authority source is a dependency, not a constant.
