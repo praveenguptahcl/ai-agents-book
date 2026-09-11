@@ -140,7 +140,8 @@ def session():
     """A VERIFIED Ch 6 session — issued and signature-checked, not a string."""
     store = TenantStore(secret=b"lab-1-fixture-secret-32-bytes!!")
     store.register(TENANT, "Alpha desk")
-    return store.verify(store.issue(TENANT, scopes=("read", "write")))
+    # Ch 6's scope vocabulary is read/submit/admin ("write" is not a scope).
+    return store.verify(store.issue(TENANT, scopes=("read", "submit")))
 
 
 @pytest.fixture()

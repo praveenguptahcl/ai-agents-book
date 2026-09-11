@@ -363,7 +363,8 @@ def test_report_carries_the_evidence():
     # The judges must agree the thesis is sound.
     assert isinstance(report.kappa, float) and report.kappa >= KAPPA_GATE
     # The golden set must be the pinned one, untampered.
-    assert report.dataset_hash == dataset.pinned_hash()
+    # (pinned_hash is a property on Ch 15's FrozenDataset, not a method.)
+    assert report.dataset_hash == dataset.pinned_hash
     # Verification has a budget; the desk will not fund an infinite audit.
     assert 0.0 <= report.cost_per_verified_signal <= JUDGE_BUDGET
     assert report.reason  # the human-readable why is not optional
