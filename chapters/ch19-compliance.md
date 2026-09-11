@@ -26,7 +26,7 @@ The table below is organized by what the frameworks actually demand, grouped und
 |---|---|---|---|
 | Inputs carry provenance | EU AI Act Art. 10 (data governance); NIST AI RMF Map 2 | Ch 2 Observe stage: observations labeled REAL vs SYNTHETIC, with age and source | Organizational data-quality processes (bias review, dataset documentation) are not in this book |
 | Tenant data is separated at rest and in context | ISO 42001 A.7 (data stewardship); SOC 2 CC6.1 (logical access) | Ch 6: HMAC-bound tenant sessions, per-tenant memory scoping, quota on the tenant record | Key-management operations (rotation ceremony, HSM policy) are assumed, not built |
-| Retrieved evidence is access-controlled | SOC 2 CC6.1; NIST AI RMF Govern 4 | Ch 15 §: ACL-at-index vs at-query, noted at the Ch 6/9 intersection | No reference implementation of the ACL index itself |
+| Retrieved evidence is access-controlled | SOC 2 CC6.1;  | Ch 15 §: ACL-at-index vs at-query, noted at the Ch 6/9 intersection | No reference implementation of the ACL index itself |
 
 **Decide: the agent's intentions are structured, rejectable, and attributable.**
 
@@ -40,8 +40,8 @@ The table below is organized by what the frameworks actually demand, grouped und
 
 | Demand | Framework clause | Book mechanism | Gap |
 |---|---|---|---|
-| High-risk actions require approval | EU AI Act Art. 14 (human oversight) | Ch 18: payload-bound, single-use approval tickets; Ch 11: two-admin lift for FULL_STOP | Approval *policy* (which actions are high-risk) is set by the operator, not the book |
-| The system can be stopped | EU AI Act Art. 14; ISO 42001 A.8 (operational control) | Ch 11: kill switches with per-tenant/per-strategy scope, send-time guard, TOCTOU-closed | Physical/business-continuity aspects (what happens to the business while stopped) are out of scope |
+| High-risk actions require approval | EU AI Act Art. 14 (human oversight) | Ch 18: payload-bound, single-use approval tickets; Ch 11: two-admin lift for FULL_STOP | None technical — Chapter 19 (§19.3) provides the risk-based approval policy |
+| The system can be stopped | EU AI Act Art. 14; ISO 42001 Clause 8.1 (operational control) | Ch 11: kill switches with per-tenant/per-strategy scope, send-time guard, TOCTOU-closed | Physical/business-continuity aspects (what happens to the business while stopped) are out of scope |
 | Execution is idempotent and reconciled | SOC 2 PI1 (processing integrity) | Ch 10: idempotent executor, open-state lifecycle, settling window, WAL | None technical |
 | Network and execution boundaries hold | SOC 2 CC6.1, CC7 (boundary protection) | Ch 13: SSRF middleware, sandboxed shells, egress allowlist | Cloud-infrastructure controls (VPC design, IAM) are assumed |
 | Adversarial inputs are defended | EU AI Act Art. 15 (cybersecurity); NIST AI RMF Manage 2 | Ch 12: injection defense with honest residual; Ch 7: MCP description-override defense | The honest residual (in-mandate homoglyph) must be disclosed to the risk owner — see §19.4 |
@@ -51,9 +51,9 @@ The table below is organized by what the frameworks actually demand, grouped und
 | Demand | Framework clause | Book mechanism | Gap |
 |---|---|---|---|
 | Automatic logging of operations | EU AI Act Art. 12 (record-keeping / logging) | Ch 9: HMAC-chained evidence spine; Ch 14: async TraceWriter with backpressure discipline | Log *retention periods* are a policy decision, not a mechanism |
-| Logs are tamper-evident | SOC 2 CC7.3 (integrity of logs); ISO 42001 A.9 | Ch 9: HMAC-SHA256 chain with WORM checkpoint anchoring | The WORM store itself (S3 Object Lock or equivalent) is infrastructure, assumed |
+| Logs are tamper-evident | SOC 2 CC7.1 (system monitoring); ISO 42001 A.6.2.8 (recording of event logs) | Ch 9: HMAC-SHA256 chain with WORM checkpoint anchoring | The WORM store itself (S3 Object Lock or equivalent) is infrastructure, assumed |
 | Evaluations are systematic and repeatable | NIST AI RMF Measure 1–3; ISO 42001 §9 (performance evaluation) | Ch 15: frozen golden sets, κ agreement stats, Wilson intervals, CI gates; Ch 16: walk-forward with embargo; Ch 17: PSR/DSR | Eval *dataset curation* (representativeness, bias review) is organizational |
-| Incident response exists and is rehearsed | SOC 2 CC7.4; NIST AI RMF Govern 6 | Ch 14: the outcome-unknown on-call script; Ch 11: kill-switch drills | The rehearsal *schedule* and staffing are organizational |
+| Incident response exists and is rehearsed | SOC 2 CC7.4; NIST AI RMF Manage 4 | Ch 14: the outcome-unknown on-call script; Ch 11: kill-switch drills | The rehearsal *schedule* and staffing are organizational |
 | Risk management is continuous | EU AI Act Art. 9 (risk management system); ISO 42001 §6 | Appendix E: the executable Production Standard gate in CI | The risk register and its review cadence are organizational |
 
 Read the Gap column as carefully as the Mechanism column. The pattern is consistent: the book builds the technical half — the part that runs in code — and names the organizational half explicitly. An auditor who sees a gap named and owned will trust the mechanisms more, not less. A mapping that claims ISO 42001 §5 (leadership) is satisfied by a Pydantic model is a mapping that has never met an auditor.
