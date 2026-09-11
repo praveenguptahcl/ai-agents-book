@@ -255,11 +255,28 @@ class FrameworkAdapter:
         """Open an approval ticket. Returns the ticket id.
 
         The ticket binds to the *digest* of the proposed arguments: approving
-        one payload does not approve a different payload.
+        one payload does not approve a different payload. Session and
+        arguments are validated HERE, at request time — an approval ticket
+        must never be issued to an unauthenticated caller or for a payload
+        that fails the contract, or the queue becomes a forgery factory.
         """
         reg = self._registry.get(tool)
         if reg is None:
             raise UnwrappedToolRefused(f"tool not registered: {tool!r}")
+        if self._session_verifier is None:
+            raise NoAuthoritySource("no session verifier configured")
+        try:
+            self._session_verifier(session, tool)
+        except Exception as exc:
+            raise ScopeDenied(f"session verifier failed: {exc}") from exc
+
+        try:
+            reg.contract.model_validate(raw_args)
+        except ValidationError as exc:
+            raise ContractViolation(
+                f"arguments failed contract for {tool!r}: {exc.errors()}"
+            ) from exc
+
         digest = _digest(raw_args)
         ticket_id = uuid.uuid4().hex
         now = time.time()

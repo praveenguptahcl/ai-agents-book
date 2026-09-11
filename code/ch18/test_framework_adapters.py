@@ -343,7 +343,7 @@ def test_evidence_never_stores_raw_args():
         adapter.call("sess-desk-a", "dump_positions", {"notify": 1})
     for rec in adapter.evidence:
         assert len(rec.args_digest) == 64  # sha256 hex
-        assert "notify" not in rec.args_digest or True  # digest, not args
+        assert "notify" not in rec.args_digest  # digest, not args
     assert [r.verdict for r in adapter.evidence] == ["allowed",
                                                      "refused:contract"]
 
@@ -359,3 +359,36 @@ def test_all_adapter_errors_share_base():
                 ContractViolation, ApprovalRequired, ApprovalInvalid,
                 OutputBlocked, ToolExecutionError):
         assert issubclass(exc, AdapterError)
+
+
+def test_request_approval_validates_session_and_contract():
+    # Regression: request_approval() once issued tickets without checking the
+    # session or the arguments — contradicting the prose ("checked at request
+    # time") and letting unauthenticated callers flood the approval queue
+    # with invalid payloads.
+    adapter = make_writing_adapter()
+    # Bad session: the verifier denies.
+    with pytest.raises(ScopeDenied):
+        adapter.request_approval("sess-intruder", "place_order",
+                                 {"symbol": "AAPL", "qty": 100},
+                                 requested_by="agent-7")
+    # Bad payload: fails the contract (qty must be an int).
+    with pytest.raises(ContractViolation):
+        adapter.request_approval("sess-desk-a", "place_order",
+                                 {"symbol": "AAPL", "qty": "many"},
+                                 requested_by="agent-7")
+    # No tickets were issued for the refused requests.
+    assert adapter._tickets == {}
+    # And a valid request still works.
+    ticket = adapter.request_approval("sess-desk-a", "place_order",
+                                      {"symbol": "AAPL", "qty": 100},
+                                      requested_by="agent-7")
+    assert ticket in adapter._tickets
+
+
+def test_request_approval_refuses_without_verifier():
+    adapter = make_adapter()
+    adapter._session_verifier = None
+    with pytest.raises(NoAuthoritySource):
+        adapter.request_approval("sess-desk-a", "dump_positions",
+                                 {"notify": False}, requested_by="agent-7")
