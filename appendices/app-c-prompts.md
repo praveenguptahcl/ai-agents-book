@@ -229,3 +229,172 @@ blocks:
 - **Leave alone:** the five-block order, dissent-before-approval on
   high-stakes items, and the free-text reason requirement. The moment the
   reason becomes a checkbox, the control becomes the Ch 1 ritual again.
+
+---
+
+## C.4 LLM-judge grading rubrics
+
+Ch 15's discipline: judges are measured, never trusted — pinned model,
+temperature 0, strict schema, κ against humans. These rubrics are the
+reusable grading instruments. Each rubric scores one dimension on a 0–2
+scale (0 = fail, 1 = partial, 2 = pass); a verdict of PASS requires 2s on
+every *gating* dimension.
+
+**When to use.** Any LLM-as-judge evaluation (Ch 15): thesis scoring, answer
+grading, code-review judges. Always pair with a deterministic grader where
+one exists — the κ between them is the measurement that matters.
+
+**When NOT to use.** When a deterministic check decides the question
+(schema validity, label presence, numeric thresholds). A judge where a
+grader suffices is theater with a token bill — and its κ will tell you so.
+
+```yaml
+# rubric_thesis_alignment.yaml — the Ch 15 trading-thesis judge.
+# Scores whether a strategy's written thesis matches historical conditions.
+# CALL PARAMS: model pinned (record id + content hash), temperature 0,
+# strict JSON schema output.
+
+rubric_id: thesis_alignment
+version: "1.0"
+judge_instructions: >
+  You are grading a trading thesis against the historical record. You are
+  a grader, not an advocate: your job is to find the mismatch, not to
+  steelman the thesis. Score each dimension 0, 1, or 2. Quote the exact
+  thesis sentence and the exact historical fact for every score you give.
+dimensions:
+  - name: bar_label_discipline
+    gating: true
+    question: "Does the thesis cite ONLY bars labeled REAL for its evidence?"
+    score_2: "Every cited bar is labeled REAL; no SYNTHETIC bar is used as evidence."
+    score_1: "Mostly REAL; one SYNTHETIC bar cited but flagged as illustrative."
+    score_0: "SYNTHETIC bars cited as evidence, or bar labels absent entirely."
+  - name: condition_match
+    gating: true
+    question: "Do the historical conditions actually match the thesis's claimed setup?"
+    score_2: "Claimed setup (regime, volatility band, liquidity) matches the record on all stated conditions."
+    score_1: "Matches on most conditions; one material condition unverified or mismatched."
+    score_0: "Core claimed condition contradicts the record."
+  - name: falsifiability
+    gating: false
+    question: "Does the thesis state what would prove it wrong?"
+    score_2: "Explicit invalidation condition with a measurable trigger."
+    score_1: "Vague invalidation ('if it stops working')."
+    score_0: "No invalidation condition; the thesis cannot be wrong."
+verdict_rule: "PASS requires score 2 on all gating dimensions. Any 0 on a gating dimension is FAIL. Else NEEDS_HUMAN (routes to a Ch 15 HumanReviewTicket)."
+output_schema: "{dimension_scores: {name: {score, thesis_quote, fact_quote}}, verdict, judge_model_id, prompt_hash}"
+```
+
+```yaml
+# rubric_groundedness.yaml — the Ch 15 retrieval-eval judge.
+# Scores whether an answer's claims are supported by retrieved spans.
+rubric_id: groundedness
+version: "1.0"
+judge_instructions: >
+  You are checking grounding, not quality. A beautifully written answer
+  with one unsupported claim fails. For each factual claim in the answer,
+  find the retrieved span that supports it. A claim with no supporting span
+  is UNGROUNDED even if it is true — truth without evidence is not
+  groundedness.
+dimensions:
+  - name: claim_coverage
+    gating: true
+    question: "Is every factual claim traceable to a retrieved span (the Ch 9 claim ledger)?"
+    score_2: "All claims traced; span ids listed per claim."
+    score_1: "All material claims traced; minor claims untraced."
+    score_0: "Any material claim untraced."
+  - name: span_fidelity
+    gating: true
+    question: "Do the cited spans actually say what the answer claims?"
+    score_2: "Every cited span supports its claim on inspection."
+    score_1: "Spans broadly support claims; one requires charitable reading."
+    score_0: "A cited span contradicts or is irrelevant to its claim."
+verdict_rule: "PASS requires 2 on both dimensions. Anything else is FAIL — groundedness has no partial credit at the gate, only in diagnostics."
+output_schema: "{claims: [{claim_text, span_id_or_UNGROUNDED, fidelity_note}], verdict, judge_model_id, prompt_hash}"
+```
+
+**Customization guide.**
+- **Change:** the dimensions and their 0/1/2 anchors to your grading task;
+  the verdict rule to your risk tolerance (gating vs advisory).
+- **Leave alone:** the "quote the evidence for every score" instruction,
+  the judge-model-id + prompt-hash in the output schema, and the rule that
+  a judge never overrides a deterministic grader — it only adds a measured
+  second opinion. Remove those and you have an oracle, not an instrument.
+
+---
+
+## C.5 The Maya ritual checklist (deployable runbook excerpt)
+
+From Ch 1: the pre-deployment ritual that Harbor's board adopted — the
+human ceremony that *accompanies* the code, because some things (who owns
+the incident, who can lift the kill) are social facts that must be spoken
+aloud to be real. This is the deployable version: run it before any
+production promotion, and record the signed checklist in the evidence
+spine.
+
+**When to use.** Before every production deployment or scope expansion of
+an agent system. The checklist takes fifteen minutes; the incidents it
+prevents take quarters.
+
+**When NOT to use.** As a substitute for the automated gates (Ch 15 CI,
+Appendix E production gate). The ritual covers what automation cannot —
+ownership, judgment, and the willingness to say "not yet."
+
+```yaml
+# ritual_checklist.yaml — the Maya pre-deployment ritual.
+# Each item is spoken aloud by the named owner and recorded.
+
+ritual: pre_deployment
+version: "1.0"
+items:
+  - id: incident_owner
+    spoken_by: "the deployer"
+    text: "The incident owner for this deployment is {NAME}. They have
+      acknowledged, in this room, that the 3 a.m. page goes to them."
+  - id: kill_switch
+    spoken_by: "the incident owner"
+    text: "The kill switch for scope {SCOPE} was tested {DATE} and trips
+      in under {N} seconds. I know how to trip it and who else can."
+  - id: authority_review
+    spoken_by: "the security reviewer"
+    text: "Every capability granted to this agent was reviewed against
+      least authority. The full capability list is {LINK_OR_DIGEST}."
+  - id: eval_gate
+    spoken_by: "the eval owner"
+    text: "The eval suite is green at commit {SHA}: {PASS_RATE} with Wilson
+      lower bound {LOWER} (Ch 15), cost-per-verified-success {COST}."
+  - id: evidence_spine
+    spoken_by: "the deployer"
+    text: "The evidence spine is live: HMAC-chained, tenant-scoped,
+      retained {RETENTION}. The last verified checkpoint is {DIGEST}."
+  - id: rollback
+    spoken_by: "the incident owner"
+    text: "Rollback to {PREVIOUS_VERSION} was rehearsed {DATE} and takes
+      {N} minutes. The rollback does not delete evidence."
+  - id: the_question
+    spoken_by: "anyone in the room"
+    text: "'What are we choosing not to verify?' — asked aloud, answered
+      aloud, recorded. The answer is never 'everything is verified.'"
+recording: "Signed checklist (names, timestamps) appended to the Ch 9
+  evidence spine as a RITUAL record. A deployment without the record is
+  an undeployed deployment."
+```
+
+**Customization guide.**
+- **Change:** the owner roles to your org chart, the thresholds and
+  retention to your policy, the spoken wording to your team's voice.
+- **Leave alone:** the final question ("what are we choosing not to
+  verify?") and the rule that the record lives in the evidence spine.
+  The question is the whole point: it forces the team to name the residual
+  risk instead of performing confidence. A ritual that cannot surface doubt
+  is the Ch 1 ritual — the one that decayed.
+
+---
+
+## C.6 Versioning and change control for this appendix
+
+These templates are code. Changes follow the Ch 15 frozen-artifact
+discipline: bump the `version`, record the diff and its reason, re-run any
+eval that consumes the template (judge rubrics: re-measure κ; system
+prompts: re-run the golden set), and never edit a pinned version in place.
+A template at v1.0 that behaved one way and a template at v1.0 that behaves
+another way is a forgery — of your own policy.

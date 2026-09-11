@@ -227,7 +227,7 @@ def _validate_security_schemes(schemes: Any, path: str, res: ValidationResult) -
             res.fail("card.security_scheme.not_an_object", sp,
                      "SecurityScheme must be an object (§4.5.1)")
             continue
-        present = [k for k in SCHEME_KINDS if scheme.get(k)]
+        present = [k for k in SCHEME_KINDS if k in scheme]
         if len(present) != 1:
             # Spec §4.5.1: MUST contain exactly one of the five kinds.
             res.fail("card.security_scheme.not_exactly_one_kind", sp,
