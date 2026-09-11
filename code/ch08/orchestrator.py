@@ -167,6 +167,12 @@ class DelegationRecord(BaseModel):
     cost_tokens: int = 0
     latency_s: float = 0.0
     evidence: WorkerResult | None = None
+    # The budget this delegation was granted, stored on the record so a
+    # LATE result can still be checked against it. reconcile() closes
+    # open delegations minutes later; without the budget on the record,
+    # a timed-out worker could merge unbounded spend into the trace.
+    token_budget: int = 0
+    timeout_s: float = 0.0
 
 
 # --------------------------------------------------------------------------
@@ -312,6 +318,8 @@ class Orchestrator:
             depth=depth,
             status="open",  # every delegation starts open; only a
             # verified result closes it (Ch 2's pending-state rule)
+            token_budget=budget.max_tokens,
+            timeout_s=budget.max_seconds,
         )
         self.trace.append(record)
         self._active.append(worker_name)
@@ -338,7 +346,10 @@ class Orchestrator:
         record.latency_s = self._clock() - started
 
         # 3b. The transport seam promises a dict. A dispatch that returns
-        #     anything else is a broken worker, not a result.
+        #     anything else is a broken worker, not a result. The
+        #     failure is RECORDED, not raised: the supervisor's loop
+        #     must survive to adjudicate the remaining workers, and a
+        #     hard exception would blow up its call stack instead.
         if not isinstance(raw, dict):
             record.status = "failed"
             record.failure = (
@@ -346,22 +357,33 @@ class Orchestrator:
                 "a worker that cannot speak the evidence protocol "
                 "cannot be trusted"
             )
-            raise WorkerFailed(record.failure)
+            return record
 
-        # 4. Budget, checked after dispatch on the ACTUAL cost.
+        # 4. Budget, checked after dispatch on the ACTUAL cost. Same
+        #    record-don't-raise discipline: exhaustion is a fact for the
+        #    supervisor to adjudicate, not an exception that preempts it.
         tokens = self._extract_tokens(raw)
+        unaccounted = tokens is None
+        if unaccounted:
+            # A worker that cannot account for its cost is treated as
+            # having spent its entire budget — fails closed, and the
+            # worksheet shows the budget line, not a poisoned integer.
+            tokens = budget.max_tokens
         record.cost_tokens = tokens
-        if tokens > budget.max_tokens or record.latency_s > budget.max_seconds:
+        if (unaccounted or tokens > budget.max_tokens
+                or record.latency_s > budget.max_seconds):
             record.status = "failed"
             record.failure = (
                 f"budget exhausted: {tokens} tokens / {record.latency_s:.2f}s "
                 f"against {budget.max_tokens} tokens / {budget.max_seconds}s"
+                + (" (unaccounted spend)" if unaccounted else "")
             )
-            raise BudgetExhausted(record.failure)
+            return record
 
         # 5. Evidence discipline: the worker's output is untrusted until
         #    it validates. Poison is quarantined — recorded for forensics,
-        #    never merged into the trace as evidence.
+        #    never merged into the trace as evidence. Quarantine is also
+        #    recorded, not raised, for the same adjudication reason.
         try:
             result = WorkerResult(**raw)
         except ValidationError as exc:
@@ -371,7 +393,7 @@ class Orchestrator:
                 {"delegation_id": delegation_id, "raw": raw,
                  "errors": str(exc)}
             )
-            raise EvidenceQuarantined(record.failure) from exc
+            return record
 
         if result.worker != worker_name or result.task_id != ctx.delegation_id:
             # Identity laundering: a result that claims to be someone else's.
@@ -385,7 +407,7 @@ class Orchestrator:
                 {"delegation_id": delegation_id, "raw": raw,
                  "errors": "identity mismatch"}
             )
-            raise EvidenceQuarantined(record.failure)
+            return record
 
         record.status = "ok"
         record.evidence = result
@@ -396,7 +418,11 @@ class Orchestrator:
 
         The timeout path leaves status "open"; when the late result
         arrives, it goes through the SAME evidence validation as a
-        fresh result. A late answer is still an untrusted answer.
+        fresh result — shape, identity, AND budget. A late answer is
+        still an untrusted answer, and a timed-out worker does not get
+        a free pass on the budget it already burned past. Outcomes are
+        recorded on the record, not raised: the supervisor called
+        reconcile() inside its loop and must survive to adjudicate.
         """
         record = next(
             (r for r in self.trace if r.delegation_id == delegation_id), None
@@ -416,11 +442,44 @@ class Orchestrator:
                 {"delegation_id": delegation_id, "raw": raw,
                  "errors": str(exc)}
             )
-            raise EvidenceQuarantined(record.failure) from exc
+            return record
+
+        # Identity, checked on late results exactly as on fresh ones: a
+        # late result that claims to be another worker's (or another
+        # delegation's) is laundering, not evidence.
+        if result.worker != record.worker or result.task_id != delegation_id:
+            record.status = "quarantined"
+            record.failure = (
+                "worker identity mismatch in late evidence: "
+                f"expected ({record.worker}, {delegation_id}), got "
+                f"({result.worker}, {result.task_id})"
+            )
+            self.quarantine.append(
+                {"delegation_id": delegation_id, "raw": raw,
+                 "errors": "identity mismatch"}
+            )
+            return record
+
+        # Budget, enforced on the late result against the budget stored
+        # on the record at dispatch time. The timeout already fired once;
+        # the worker does not earn unbounded spend for being late.
+        tokens = self._extract_tokens(raw)
+        unaccounted = tokens is None
+        if unaccounted:
+            tokens = record.token_budget
+        record.cost_tokens = tokens
+        if unaccounted or tokens > record.token_budget:
+            record.status = "failed"
+            record.failure = (
+                f"late result exceeded delegation budget: {tokens} tokens "
+                f"against {record.token_budget}"
+                + (" (unaccounted spend)" if unaccounted else "")
+            )
+            return record
+
         record.status = "ok"
         record.failure = None
         record.evidence = result
-        record.cost_tokens = self._extract_tokens(raw)
         return record
 
     # -- adjudication: the supervisor decides ------------------------------
@@ -476,15 +535,19 @@ class Orchestrator:
     # -- helpers ------------------------------------------------------------
 
     @staticmethod
-    def _extract_tokens(raw: dict) -> int:
-        # A missing cost accounting is not zero cost — it is unaccounted
-        # spend, and unaccounted spend fails closed at the full budget.
+    def _extract_tokens(raw: dict) -> int | None:
+        # Returns None when the spend is unaccounted (missing, wrong
+        # type, negative, or boolean). The CALLER decides the failure
+        # semantics: unaccounted spend fails closed at the full budget.
+        # Returning None instead of a poisoned integer keeps the cost
+        # worksheet honest — a sentinel like 2**31 would corrupt every
+        # total it touched.
         if "cost_tokens" not in raw:
-            return 2**31
+            return None
         tokens = raw["cost_tokens"]
         if (not isinstance(tokens, int) or isinstance(tokens, bool)
                 or tokens < 0):
-            return 2**31
+            return None
         return tokens
 
     def sub_delegate(self, ctx: DelegationContext, worker_name: str,
@@ -497,6 +560,14 @@ class Orchestrator:
         worker's granted scope — attenuation compounds down the chain.
         The tenant is inherited, never chosen: cross-tenant delegation
         is refused before any other check.
+
+        Budgets attenuate too: a child may not be granted more than the
+        parent delegation holds. A sub-delegation that passes no budget
+        gets one bounded by the parent's — never a fresh default that
+        would let a tree of N agents spend N x the parent's limit. A
+        sub-delegation that ASKS for more than the parent holds is
+        refused: asking for authority beyond your grant is ScopeDenied,
+        whether the currency is scopes or tokens.
         """
         tenant_id = kwargs.pop("tenant_id", ctx.tenant_id)
         if tenant_id != ctx.tenant_id:
@@ -511,7 +582,27 @@ class Orchestrator:
                 f"{sorted(narrowed - ctx.granted_scopes)} outside the "
                 "parent delegation's granted scope"
             )
+        child_budget = kwargs.pop("budget", None)
+        if child_budget is None:
+            # No budget named: bound the child by the parent's grant.
+            child_budget = Budget(max_tokens=ctx.token_budget,
+                                  max_seconds=ctx.timeout_s)
+        else:
+            if child_budget.max_tokens > ctx.token_budget:
+                raise ScopeDenied(
+                    f"sub-delegation asks for {child_budget.max_tokens} "
+                    f"tokens against the parent's grant of "
+                    f"{ctx.token_budget}: budgets attenuate, they do not "
+                    "widen"
+                )
+            if child_budget.max_seconds > ctx.timeout_s:
+                raise ScopeDenied(
+                    f"sub-delegation asks for {child_budget.max_seconds}s "
+                    f"against the parent's grant of {ctx.timeout_s}s: "
+                    "budgets attenuate, they do not widen"
+                )
         return self.delegate(
             worker_name, task, set(narrowed),
-            depth=ctx.depth + 1, parent_id=ctx.delegation_id, **kwargs,
+            depth=ctx.depth + 1, parent_id=ctx.delegation_id,
+            budget=child_budget, **kwargs,
         )

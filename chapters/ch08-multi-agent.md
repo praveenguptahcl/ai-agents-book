@@ -200,6 +200,21 @@ a confusing half-state — three workers done, one silently
 unauthorized — instead of failing loudly at the boundary where the
 fix is obvious. Fail closed, at every hop.
 
+The principle covers budgets, not just scopes. `sub_delegate()` —
+the worker-side entry point for nested delegation — enforces budget
+attenuation: a child may not be granted more tokens or seconds than
+the parent delegation holds, and a sub-delegation that passes no
+budget gets one *bounded by the parent's*, never a fresh default.
+Without this, a tree of N agents each holding a fresh 4,000-token
+budget spends N × 4,000 against a parent that was granted 4,000 —
+the leash multiplies with the team. Asking for more than the grant
+holds is refused as `ScopeDenied`, because asking for authority
+beyond your grant is a scope violation whether the currency is
+permissions or tokens. (A shared token pool that deducts the
+parent's own spend before granting children is the production
+hardening; the allocation bound here is the guarantee the primitive
+makes.)
+
 ---
 
 ## 8.5 The orchestrator
@@ -274,10 +289,27 @@ and the order is the pedagogy:
    die on this check.
 4. **Budget, on the actual cost.** After dispatch, the real token
    spend and real latency are measured against the delegation's
-   budget. Exhaustion raises `BudgetExhausted` — the runaway is
-   halted, and the trace says exactly which budget broke.
+   budget. Exhaustion halts the delegation — the runaway is stopped,
+   and the trace says exactly which budget broke. A result with no
+   usable cost accounting is treated as having spent its entire
+   budget: unaccounted spend fails closed, and the cost worksheet
+   shows the budget line, not a poisoned integer.
 5. **Evidence validation.** The worker's output is validated against
    `WorkerResult` before it touches the trace (§8.6).
+
+A deliberate choice runs through checks 3b, 4, and 5: failures are
+**recorded on the delegation record, not raised as exceptions**.
+`delegate()` returns the record whatever happened — `"ok"`,
+`"failed"`, or `"quarantined"` — because the caller is a supervisor
+loop that must survive to adjudicate the remaining workers. A hard
+`BudgetExhausted` or `EvidenceQuarantined` exception would blow up
+that loop's call stack: the supervisor could never inspect the
+partial completions and decide, which is the entire job §8.7 gives
+it. (Refusals *before* dispatch — unknown worker, scope denied,
+depth exceeded, cycle detected — still raise: nothing was dispatched,
+there is no record to return, and the caller made a programming
+error, not a judgment call.) Incompleteness is a decision, and
+decisions belong to `adjudicate()`, not to the exception handler.
 
 Every delegation starts with status `"open"` and only a verified
 result closes it — Ch 2's pending-state rule, enforced in code. The
@@ -366,9 +398,22 @@ can see.
 
         The timeout path leaves status "open"; when the late result
         arrives, it goes through the SAME evidence validation as a
-        fresh result. A late answer is still an untrusted answer.
+        fresh result — shape, identity, AND budget. A late answer is
+        still an untrusted answer, and a timed-out worker does not get
+        a free pass on the budget it already burned past. Outcomes are
+        recorded on the record, not raised: the supervisor called
+        reconcile() inside its loop and must survive to adjudicate.
         """
 ```
+
+The "same validation" is literal, not aspirational: `reconcile()`
+re-runs shape validation, the identity check (a late result claiming
+another worker's name is laundering, not evidence), *and* the budget
+check — against the budget stored on the delegation record at
+dispatch time. A worker that timed out does not earn unbounded spend
+for being late. Outcomes are recorded on the record, never raised:
+the supervisor called `reconcile()` inside its loop and must survive
+to adjudicate.
 
 **Crash → recorded, not retried here.** A worker that raises gets
 status `"failed"` with the exception type in the record. Retry policy

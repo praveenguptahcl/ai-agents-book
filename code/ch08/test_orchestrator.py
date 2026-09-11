@@ -6,11 +6,9 @@ import pytest
 
 from orchestrator import (
     Budget,
-    BudgetExhausted,
     CycleDetected,
     DelegationContext,
     DepthExceeded,
-    EvidenceQuarantined,
     Observation,
     Orchestrator,
     ScopeDenied,
@@ -18,7 +16,6 @@ from orchestrator import (
     UnknownWorker,
     WorkerResult,
     WorkerSpec,
-    WorkerFailed,
 )
 
 SECRET_AUTHORITY = {"market.read", "orders.propose", "risk.veto", "risk.read"}
@@ -183,9 +180,7 @@ def test_poisoned_evidence_extra_field_is_quarantined():
     orc = register_echo(make_orc(), fn=lambda ctx, p: {
         **ok_result(ctx), "execute_now": True,  # injected field
     })
-    with pytest.raises(EvidenceQuarantined):
-        orc.delegate("research", "pull data", {"market.read"})
-    rec = orc.trace[0]
+    rec = orc.delegate("research", "pull data", {"market.read"})
     assert rec.status == "quarantined"
     assert rec.evidence is None  # never merged
     assert len(orc.quarantine) == 1  # kept for forensics
@@ -202,18 +197,17 @@ def test_poisoned_evidence_bad_provenance_is_quarantined():
                                              "detail": "x",
                                              "provenance": "TRUSTME",
                                              "as_of": "now"}]})
-    with pytest.raises(EvidenceQuarantined):
-        orc.delegate("research", "pull data", {"market.read"})
-    assert orc.trace[0].status == "quarantined"
+    rec = orc.delegate("research", "pull data", {"market.read"})
+    assert rec.status == "quarantined"
 
 
 def test_worker_identity_laundering_is_quarantined():
     orc = register_echo(make_orc(), fn=lambda ctx, p: {
         **ok_result(ctx), "worker": "risk",  # claims to be someone else
     })
-    with pytest.raises(EvidenceQuarantined):
-        orc.delegate("research", "pull data", {"market.read"})
-    assert "identity mismatch" in (orc.trace[0].failure or "")
+    rec = orc.delegate("research", "pull data", {"market.read"})
+    assert rec.status == "quarantined"
+    assert "identity mismatch" in (rec.failure or "")
 
 
 # -- failure semantics ----------------------------------------------------------
@@ -247,8 +241,8 @@ def test_reconcile_closes_open_delegation_with_same_validation():
     assert closed.evidence.summary == "late answer"
     # A late answer is still untrusted: poison fails reconciliation too.
     rec2 = orc.delegate("research", "pull more", {"market.read"})
-    with pytest.raises(EvidenceQuarantined):
-        orc.reconcile(rec2.delegation_id, {"garbage": 1})
+    closed2 = orc.reconcile(rec2.delegation_id, {"garbage": 1})
+    assert closed2.status == "quarantined"
 
 
 def test_worker_crash_is_recorded_not_retried_here():
@@ -265,20 +259,19 @@ def test_transport_returning_non_dict_is_worker_failed():
     # The dispatch seam promises a dict. A worker that returns anything
     # else cannot speak the evidence protocol and cannot be trusted.
     orc = register_echo(make_orc(), fn=lambda ctx, p: "trust me")
-    with pytest.raises(WorkerFailed):
-        orc.delegate("research", "pull data", {"market.read"})
-    assert orc.trace[0].status == "failed"
+    rec = orc.delegate("research", "pull data", {"market.read"})
+    assert rec.status == "failed"
+    assert "not a dict" in (rec.failure or "")
 # -- budgets: the leash ---------------------------------------------------------
 
 
 def test_token_budget_exhaustion_halts():
     orc = register_echo(
         make_orc(), fn=lambda ctx, p: ok_result(ctx, tokens=10_000))
-    with pytest.raises(BudgetExhausted):
-        orc.delegate("research", "pull data", {"market.read"},
-                     budget=Budget(max_tokens=4_000, max_seconds=30.0))
-    assert orc.trace[0].status == "failed"
-    assert "budget exhausted" in (orc.trace[0].failure or "")
+    rec = orc.delegate("research", "pull data", {"market.read"},
+                         budget=Budget(max_tokens=4_000, max_seconds=30.0))
+    assert rec.status == "failed"
+    assert "budget exhausted" in (rec.failure or "")
 
 
 def test_latency_budget_exhaustion_halts():
@@ -289,10 +282,10 @@ def test_latency_budget_exhaustion_halts():
         return ok_result(ctx, tokens=10)
 
     orc = register_echo(make_orc(clock=lambda: now[0]), fn=slow)
-    with pytest.raises(BudgetExhausted):
-        orc.delegate("research", "pull data", {"market.read"},
-                     budget=Budget(max_tokens=4_000, max_seconds=30.0))
-    assert orc.trace[0].latency_s == pytest.approx(45.0)
+    rec = orc.delegate("research", "pull data", {"market.read"},
+                       budget=Budget(max_tokens=4_000, max_seconds=30.0))
+    assert rec.status == "failed"
+    assert rec.latency_s == pytest.approx(45.0)
 
 
 def test_unaccounted_spend_fails_closed():
@@ -302,8 +295,11 @@ def test_unaccounted_spend_fails_closed():
                         fn=lambda ctx, p: {k: v for k, v in
                                            ok_result(ctx).items()
                                            if k != "cost_tokens"})
-    with pytest.raises(BudgetExhausted):
-        orc.delegate("research", "pull data", {"market.read"})
+    rec = orc.delegate("research", "pull data", {"market.read"})
+    assert rec.status == "failed"
+    assert "unaccounted spend" in (rec.failure or "")
+    # The worksheet shows the budget line, not a poisoned integer.
+    assert rec.cost_tokens == 4_000
 
 
 # -- adjudication: the supervisor decides ----------------------------------------
@@ -353,3 +349,122 @@ def test_cost_worksheet_accounts_every_delegation():
     assert sheet["delegations"] == 3
     assert sheet["total_tokens"] == 600  # 100 + 200 + 300, no hidden lines
     assert sheet["quarantined"] == 0 and sheet["open"] == 0
+
+
+# -- review fixes: reconcile enforces budget and identity --------------------
+
+def test_reconcile_rejects_late_result_over_budget():
+    # A timed-out worker does not earn unbounded spend for being late:
+    # the late result is checked against the budget stored on the record.
+    def silent(ctx, payload):
+        raise TimeoutError("worker went silent")
+
+    orc = register_echo(make_orc(), fn=silent)
+    rec = orc.delegate("research", "pull data", {"market.read"},
+                       budget=Budget(max_tokens=4_000, max_seconds=30.0))
+    assert rec.token_budget == 4_000  # the budget rides on the record
+    late = ok_result(
+        DelegationContext(
+            delegation_id=rec.delegation_id, task="pull data",
+            worker="research", tenant_id="desk-alpha",
+            granted_scopes=frozenset({"market.read"}), depth=0,
+            token_budget=4000, timeout_s=30.0),
+        summary="late and expensive", tokens=50_000)
+    closed = orc.reconcile(rec.delegation_id, late)
+    assert closed.status == "failed"
+    assert "exceeded delegation budget" in (closed.failure or "")
+
+
+def test_reconcile_quarantines_late_identity_laundering():
+    def silent(ctx, payload):
+        raise TimeoutError("worker went silent")
+
+    orc = register_echo(make_orc(), fn=silent)
+    rec = orc.delegate("research", "pull data", {"market.read"})
+    ctx = DelegationContext(
+        delegation_id=rec.delegation_id, task="pull data",
+        worker="research", tenant_id="desk-alpha",
+        granted_scopes=frozenset({"market.read"}), depth=0,
+        token_budget=4000, timeout_s=30.0)
+    late = {**ok_result(ctx, summary="late"), "worker": "risk"}
+    closed = orc.reconcile(rec.delegation_id, late)
+    assert closed.status == "quarantined"
+    assert "identity mismatch" in (closed.failure or "")
+    assert len(orc.quarantine) == 1
+
+
+def test_reconcile_within_budget_closes_ok():
+    def silent(ctx, payload):
+        raise TimeoutError("worker went silent")
+
+    orc = register_echo(make_orc(), fn=silent)
+    rec = orc.delegate("research", "pull data", {"market.read"},
+                       budget=Budget(max_tokens=4_000, max_seconds=30.0))
+    ctx = DelegationContext(
+        delegation_id=rec.delegation_id, task="pull data",
+        worker="research", tenant_id="desk-alpha",
+        granted_scopes=frozenset({"market.read"}), depth=0,
+        token_budget=4000, timeout_s=30.0)
+    closed = orc.reconcile(rec.delegation_id, ok_result(ctx, tokens=40))
+    assert closed.status == "ok"
+    assert closed.cost_tokens == 40
+
+
+# -- review fixes: budget attenuation in sub_delegate -------------------------
+
+def test_sub_delegate_refuses_child_budget_above_parent():
+    orc = make_orc(max_depth=3)
+    captured = {}
+
+    def parent_dispatch(ctx, payload):
+        captured["ctx"] = ctx
+        return ok_result(ctx)
+
+    orc.register(WorkerSpec(name="parent",
+                            declared_scopes=frozenset({"market.read"}),
+                            dispatch=parent_dispatch))
+    orc.register(WorkerSpec(name="child",
+                            declared_scopes=frozenset({"market.read"}),
+                            dispatch=lambda ctx, p: ok_result(ctx)))
+    rec = orc.delegate("parent", "do it", {"market.read"},
+                       budget=Budget(max_tokens=1_000, max_seconds=10.0))
+    ctx = captured["ctx"]
+    assert ctx.token_budget == 1_000
+    # Asking for more than the parent holds is ScopeDenied — budgets
+    # attenuate, they do not widen.
+    with pytest.raises(ScopeDenied):
+        orc.sub_delegate(ctx, "child", "help", {"market.read"},
+                         budget=Budget(max_tokens=5_000, max_seconds=10.0))
+    with pytest.raises(ScopeDenied):
+        orc.sub_delegate(ctx, "child", "help", {"market.read"},
+                         budget=Budget(max_tokens=500, max_seconds=60.0))
+    # Narrowing the budget is fine.
+    sub = orc.sub_delegate(ctx, "child", "help", {"market.read"},
+                           budget=Budget(max_tokens=500, max_seconds=5.0))
+    assert sub.status == "ok"
+    assert sub.token_budget == 500
+
+
+def test_sub_delegate_defaults_to_parent_bounded_budget():
+    # No budget passed: the child gets the parent's budget, never a
+    # fresh default that would let N agents spend N x the limit.
+    orc = make_orc(max_depth=3)
+    captured = {}
+
+    def parent_dispatch(ctx, payload):
+        captured["ctx"] = ctx
+        return ok_result(ctx)
+
+    orc.register(WorkerSpec(name="parent",
+                            declared_scopes=frozenset({"market.read"}),
+                            dispatch=parent_dispatch))
+    orc.register(WorkerSpec(name="child",
+                            declared_scopes=frozenset({"market.read"}),
+                            dispatch=lambda ctx, p: ok_result(ctx)))
+    orc.delegate("parent", "do it", {"market.read"},
+                 budget=Budget(max_tokens=1_000, max_seconds=10.0))
+    sub = orc.sub_delegate(captured["ctx"], "child", "help",
+                           {"market.read"})
+    assert sub.status == "ok"
+    assert sub.token_budget == 1_000
+    assert sub.timeout_s == 10.0
