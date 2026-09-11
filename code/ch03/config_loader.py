@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 
 # ---------------------------------------------------------------------------
 # Vocabularies: closed sets shared with the rest of the book.
@@ -66,9 +66,6 @@ PAPER_MARKERS = ("paper", "sandbox", "demo", "sim")
 #: world: a strategy not named here may not run, no matter what the
 #: planner claims it is called.
 _STRATEGY_ID_RE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
-
-#: Desk names are machine names for the same reason.
-_DESK_NAME_RE = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 
 #: Hard ceiling on leverage. Above 2x the desk is not trading, it is
 #: gambling with the firm's balance sheet. Fail closed.
@@ -127,19 +124,22 @@ def _parse_dotenv(path: str | Path) -> dict[str, str]:
     return values
 
 
-@dataclass(frozen=True)
-class Secrets:
+class Secrets(BaseModel):
     """Paper-broker credentials. Frozen, never logged, never hashed.
 
-    ``repr`` is redacted by hand because the default dataclass repr would
-    print the secret into trace logs — the exact leak Ch 9 warns about.
+    ``SecretStr`` masks the values on repr/str/log natively and
+    idiomatically — the redaction lives in the *type*, not in a
+    hand-rolled ``__repr__`` a future edit could forget to keep.
+    The .env *parser* above stays hand-rolled on purpose:
+    format-level strictness (duplicate keys, malformed lines) is a
+    property of the FILE, and Pydantic validates VALUES. Split the
+    jobs; keep both strict.
     """
 
-    api_key: str
-    api_secret: str
+    model_config = {"frozen": True, "extra": "forbid", "strict": True}
 
-    def __repr__(self) -> str:  # pragma: no cover - trivial
-        return "Secrets(api_key='***', api_secret='***')"
+    api_key: SecretStr
+    api_secret: SecretStr
 
 
 REQUIRED_SECRETS = ("ALPHAFORGE_PAPER_API_KEY", "ALPHAFORGE_PAPER_API_SECRET")
@@ -166,21 +166,22 @@ def load_secrets(env_path: str | Path) -> Secrets:
 
 
 # ---------------------------------------------------------------------------
-# Policy models: Pydantic v2, frozen, extra=forbid everywhere. A closed
-# world — unknown keys are rejected, because an unknown key is either a
-# typo for a real control or an attempt to smuggle one in.
+# Policy models: Pydantic v2, frozen, extra=forbid, strict everywhere.
+# A closed world — unknown keys are rejected (a typo for a real control
+# or an attempt to smuggle one in), and wrong types are rejected too:
+# strict=True disables Pydantic's default coercion, so a string where a
+# float belongs is a refusal, not a silent cast.
 # ---------------------------------------------------------------------------
 
 class _FrozenBase(BaseModel):
-    model_config = {"frozen": True, "extra": "forbid"}
+    model_config = {"frozen": True, "extra": "forbid", "strict": True}
 
 
 class DeskConfig(_FrozenBase):
     """Who this intent is for and what data it may look at."""
 
     # NOTE: pydantic's pattern uses the Rust regex engine, which has no \Z;
-    # $ (end of text, multi-line off) is the portable anchor here. The
-    # Python-side _DESK_NAME_RE keeps \Z for fullmatch use elsewhere.
+    # $ (end of text, multi-line off) is the portable anchor here.
     name: str = Field(pattern=r"[a-z][a-z0-9_-]{0,63}$")
     data_mode: Literal["real", "synthetic"] = Field(
         description="Provenance mode for this run: every bar the system "

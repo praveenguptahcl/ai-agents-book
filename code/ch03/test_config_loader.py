@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from config_loader import (
     PRODUCTION_HOSTS,
@@ -79,7 +79,7 @@ def test_valid_intent_loads_and_freezes(files):
     assert isinstance(intent, SystemIntent)
     assert intent.config.desk.name == "alphaforge-paper"
     assert intent.config.desk.universe == ["AAPL", "MSFT", "NVDA", "SPY", "QQQ"]
-    assert secrets.api_key == "PK_TEST_123"
+    assert secrets.api_key.get_secret_value() == "PK_TEST_123"
     # Frozen: the mandate cannot be edited after load.
     with pytest.raises(dataclasses.FrozenInstanceError):
         intent.intent_hash = "forged"  # type: ignore[misc]
@@ -106,8 +106,14 @@ def test_intent_hash_is_stable_and_versioned(files):
 
 def test_secrets_repr_is_redacted(files):
     _, secrets = load_system_intent(*files)
+    # SecretStr masks natively: the redaction lives in the type, not in
+    # a hand-rolled __repr__ a future edit could forget.
+    assert isinstance(secrets.api_key, SecretStr)
+    assert isinstance(secrets.api_secret, SecretStr)
     assert "PK_TEST_123" not in repr(secrets)
     assert "SK_TEST_456" not in repr(secrets)
+    assert "PK_TEST_123" not in str(secrets)
+    assert "SK_TEST_456" not in str(secrets)
 
 
 # -- missing pieces: refuse to start ----------------------------------------
@@ -162,8 +168,8 @@ def test_dotenv_supports_export_comments_and_quotes(tmp_path):
         "ALPHAFORGE_PAPER_API_SECRET='single quoted'\n"
     )
     secrets = load_secrets(env)
-    assert secrets.api_key == "QUOTED KEY"
-    assert secrets.api_secret == "single quoted"
+    assert secrets.api_key.get_secret_value() == "QUOTED KEY"
+    assert secrets.api_secret.get_secret_value() == "single quoted"
 
 
 # -- malformed policy: the exact key is named ---------------------------------
@@ -172,6 +178,24 @@ def test_wrong_type_names_the_key(files):
     bad = _rewrite(files, VALID_TOML.replace("max_leverage = 1.0",
                                              'max_leverage = "high"'))
     with pytest.raises(ValidationError, match="max_leverage"):
+        load_system_intent(*bad)
+
+
+def test_string_where_float_belongs_rejected_strict(files):
+    # Pydantic coerces by default; strict=True makes the closed world
+    # closed on types too. TOML has native floats — the loader demands
+    # them. A string that *looks* like a number is still a refusal.
+    bad = _rewrite(files, VALID_TOML.replace("max_daily_loss_pct = 0.03",
+                                             'max_daily_loss_pct = "0.03"'))
+    with pytest.raises(ValidationError, match="max_daily_loss_pct"):
+        load_system_intent(*bad)
+
+
+def test_bool_as_string_rejected_strict(files):
+    bad = _rewrite(files, VALID_TOML.replace(
+        "execute_on_next_bar_open = true",
+        'execute_on_next_bar_open = "true"'))
+    with pytest.raises(ValidationError, match="execute_on_next_bar_open"):
         load_system_intent(*bad)
 
 
@@ -305,5 +329,11 @@ def test_hash_covers_policy_not_secrets(files):
 
 def test_intent_config_itself_is_frozen(files):
     intent, _ = load_system_intent(*files)
+    # Note the two different "frozen" exception types in this codebase:
+    # Pydantic v2 raises pydantic_core.ValidationError on assignment to a
+    # frozen *model* (config), while the plain SystemIntent *dataclass*
+    # raises dataclasses.FrozenInstanceError. Both mean "you may not edit
+    # the mandate after load" — the type differs because the mechanism
+    # differs, not because the guarantee does.
     with pytest.raises(ValidationError):
         intent.config.risk.max_leverage = 99.0  # type: ignore[misc]
