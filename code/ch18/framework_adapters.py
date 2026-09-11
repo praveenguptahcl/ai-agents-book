@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -120,11 +120,20 @@ class LegacyTool:
 
 @dataclass
 class ToolRegistration:
-    """One wrapped tool: the legacy callable plus the discipline around it."""
+    """One wrapped tool: the legacy callable plus the discipline around it.
+
+    ``adapt`` translates the validated contract model into the legacy
+    function's calling convention: ``adapt(bound) -> (args, kwargs)``.
+    The translation lives in the adapter — never in the framework, never
+    in the legacy function — so the seam is visible and reviewable.
+    """
     legacy: LegacyTool
     contract: type[BaseModel]          # Pydantic model validating raw args
     risk: RiskTier
     allowed_scopes: frozenset[str] = frozenset()
+    adapt: Callable[[BaseModel], tuple[tuple, dict]] = field(
+        default_factory=lambda: (lambda m: ((), m.model_dump()))
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -229,12 +238,14 @@ class FrameworkAdapter:
         contract: type[BaseModel],
         risk: RiskTier,
         allowed_scopes: frozenset[str] = frozenset(),
+        adapt: Optional[Callable[[BaseModel], tuple[tuple, dict]]] = None,
     ) -> None:
         if not (isinstance(contract, type) and issubclass(contract, BaseModel)):
             raise TypeError("contract must be a Pydantic BaseModel subclass")
         self._registry[legacy.name] = ToolRegistration(
             legacy=legacy, contract=contract, risk=risk,
             allowed_scopes=allowed_scopes,
+            adapt=adapt or (lambda m: ((), m.model_dump())),
         )
 
     # -- approvals -------------------------------------------------------
@@ -325,7 +336,8 @@ class FrameworkAdapter:
                 )
 
         try:
-            result = reg.legacy.fn(**bound.model_dump())
+            args, kwargs = reg.adapt(bound)
+            result = reg.legacy.fn(*args, **kwargs)
         except AdapterError:
             raise
         except Exception as exc:
@@ -410,9 +422,6 @@ class DumpPositionsArgs(BaseModel):
                     "endpoint; anything else is refused at the contract, "
                     "before the legacy function ever runs.",
     )
-
-    from pydantic import field_validator  # noqa: E402 (kept local: the
-    # contract is self-contained so the chapter's listing reads alone)
 
     @field_validator("notify")
     @classmethod
