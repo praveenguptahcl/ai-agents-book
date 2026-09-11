@@ -16,7 +16,7 @@ One honesty note before the math. The development sample in that validation was 
 
 The Sharpe ratio — mean return divided by volatility — is the most quoted and most abused number in finance. It lies in three distinct ways, and you need all three names because each one kills strategies that the other two would have passed.
 
-**Lie one: non-normality.** The Sharpe ratio treats upside and downside volatility as the same sin. A strategy that bleeds a little every day and occasionally makes a fortune (positive skew) looks *worse* than its mirror image that grinds upward and occasionally detonates — even though you would obviously rather own the first one. Negative skew and fat tails (kurtosis) mean the realized Sharpe overstates the risk-adjusted reality. Any correction must therefore know the skew and kurtosis, not just the mean and variance.
+**Lie one: non-normality.** The Sharpe ratio treats upside and downside volatility as the same sin. Consider two strategies, both with Sharpe 1.0. Strategy A bleeds a little every day and occasionally makes a fortune — lottery-ticket payoffs, positive skew. Strategy B grinds upward a little every day and occasionally detonates — picking up pennies in front of a steamroller, negative skew. The Sharpe ratio calls them equal. You would obviously rather own A: its worst case is a slow bleed you can stop, while B's worst case is the month that ends the fund. Any correction must therefore know the skew and kurtosis, not just the mean and variance — which is exactly what the PSR denominator's $\hat{\gamma}_3$ and $\hat{\gamma}_4$ terms do. Negative skew and fat tails widen the denominator, so the same observed Sharpe earns less confidence when the return shape is ugly.
 
 **Lie two: short samples.** A Sharpe ratio estimated over forty days is mostly noise wearing a number costume. The shorter the track record, the wider the confidence interval around the estimate — and the interval, not the point estimate, is what you are betting on. We will quantify exactly how short is too short.
 
@@ -122,7 +122,7 @@ def psr(returns: np.ndarray, benchmark_sr: float = 0.0,
     return psr_from_stats(sr_annual, benchmark_sr, t_years, skew, kurt)
 ```
 
-That "frequency discipline" paragraph in the docstring is not decoration. During development, the first version of `psr()` annualized the Sharpe but passed the raw day count as T — inflating every test statistic by $\sqrt{252} \approx 15.9$ and making pure noise look like a 99.99% certainty. The adversarial test suite caught it, because one of the tests asserts that PSR over many independent zero-edge streams averages ~0.5. Mixing frequencies is the most common way smart people accidentally manufacture significance, and now the module refuses to let you do it silently: `psr()` converts Sharpe and T jointly, and `psr_from_stats()` documents the contract for direct callers.
+That "frequency discipline" paragraph in the docstring is not decoration. During development, the first version of `psr()` annualized the Sharpe but passed the raw day count as T — inflating every test statistic by $\sqrt{252} \approx 15.9$ and making pure noise look like a 99.99% certainty. The adversarial test suite caught it, because one of the tests asserts that PSR over many independent zero-edge streams averages ~0.5. (A single zero-edge stream gives a Uniform(0, 1) PSR — the only honest assertion is on the average, which is exactly the kind of thing a test-writer gets wrong on the first try, and exactly why the tests are written as adversaries rather than cheerleaders.) Mixing frequencies is the most common way smart people accidentally manufacture significance, and now the module refuses to let you do it silently: `psr()` converts Sharpe and T jointly, and `psr_from_stats()` documents the contract for direct callers. If you take one implementation lesson from this chapter, take this one: whenever a formula has a $T$ in it, ask what frequency it is in, out loud, before you trust the output.
 
 ## The Deflated Sharpe Ratio: multiplicity control
 
@@ -132,7 +132,7 @@ That benchmark is $SR_0$, the expected Sharpe ratio under the null hypothesis �
 
 $$SR_0 = \sqrt{\hat{V}} \left((1-\gamma)\Phi^{-1}\!\left(1-\frac{1}{K}\right) + \gamma\,\Phi^{-1}\!\left(1-\frac{1}{Ke}\right)\right)$$
 
-where $\hat{V}$ is the variance of the $K$ trial Sharpe ratios, $\gamma \approx 0.5772$ is the Euler–Mascheroni constant, and the two $\Phi^{-1}$ terms are the expected maximum of $K$ standard normals (with a refined second-order correction). The intuition: the more strategies you try, and the more dispersed their Sharpes, the higher the bar luck alone can clear.
+where $\hat{V}$ is the variance of the $K$ trial Sharpe ratios, $\gamma \approx 0.5772$ is the Euler–Mascheroni constant, and the two $\Phi^{-1}$ terms are the expected maximum of $K$ standard normals (with a refined second-order correction). The intuition: the more strategies you try, and the more dispersed their Sharpes, the higher the bar luck alone can clear. The first term, $\Phi^{-1}(1 - 1/K)$, is doing most of the work — it is the quantile that only one draw in $K$ should exceed by chance, which is exactly the right question: "how good should the *best* of $K$ look, if none of them works?" The Euler–Mascheroni-weighted second term corrects for the fact that the maximum of normals converges slowly, so the naive first-order answer undershoots. You do not need to re-derive extreme-value theory to use this; you need to remember that the formula exists because "best of many" is a different random variable than "one," and grading it as if it were one is the original sin of backtesting.
 
 Work it by hand for the chapter's running example. $K = 250$ trials, trial-Sharpe standard deviation 0.2:
 
@@ -262,6 +262,20 @@ def min_trl(observed_sr: float, benchmark_sr: float,
     scale = 1.0 - skew * benchmark_sr + (kurt - 1.0) / 4.0 * benchmark_sr ** 2
     return 1.0 + scale * (z / (observed_sr - benchmark_sr)) ** 2
 ```
+
+## The desk's gate: DSR in CI
+
+Formulas are not a discipline until they run unattended. Here is how this chapter's machinery becomes a merge gate — the same CI-gate pattern Chapter 15 built for graders, now for statistics.
+
+Every candidate strategy that finishes walk-forward (Ch 16) enters the gate with three artifacts: its concatenated out-of-sample return series, the full set of trial Sharpes from the sweep that produced it, and its REAL/SYNTHETIC bar provenance. The gate computes, in order:
+
+1. **minTRL check.** Is the track record long enough for the claimed edge at $\alpha = 0.05$? If not, the verdict is not FAIL — it is **INSUFFICIENT DATA**, which routes to "run longer," not "ship it." A short track record is a request for patience, not a rounding error.
+2. **PSR check.** Does the strategy beat the benchmark — usually zero, sometimes the desk's hurdle rate — with PSR ≥ 0.95 after skew/kurtosis correction? This kills the strategies whose Sharpe is an artifact of a lucky, fat-tailed run.
+3. **DSR check.** Recompute with $SR_0$ from the full trial set, including every candidate that was tried and discarded — *especially* the discarded ones, because unreported trials are unreported multiplicity. DSR ≥ 0.95 to pass.
+
+Rank surviving strategies by DSR, not by Sharpe. This is the practical content of Bailey and López de Prado's Sharpe Ratio Efficient Frontier: among strategies with similar expected Sharpe, prefer the one whose *probability of beating the benchmark* is highest — which is almost never the one with the highest point estimate. The point estimate is advertising; the PSR is the audit.
+
+One more rule, and it is the most violated: **the trial set is append-only.** If a researcher runs 50 more variants after a DSR pass and re-tests the winner, $K$ is now 300, not 250, and the gate re-runs from scratch. "We already passed" is not a statistical argument. The audit trail (Ch 9) records every trial precisely so that nobody can quietly shrink $K$ after the fact.
 
 ## Two roads, same answer: the bootstrap cross-check
 
