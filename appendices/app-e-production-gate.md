@@ -87,7 +87,7 @@ Notice what the gate does *not* do: it does not read your policy document and ju
 
 The most important test in `test_production_gate.py` is not any of the nine negative fixtures — it is the forgery suite. A certification gate that accepts claims is a rubber stamp, and every chapter of this book has argued that rubber stamps are the failure mode. So the suite submits systems that *claim* each gate with placeholder artifacts: an identity with `"version": ""`, an authority policy with `default_deny: False`, a threat model whose residual is an empty string, eval thresholds with `kappa_min: "high"`, a rollback runbook never drilled, logging with seven days of retention, an escalation tier whose approver is blank, an incident owner with no runbook. Every forgery fails — and fails *only* its own gate, so the report points the engineer at exactly one fix.
 
-The runner itself is three lines, and it is the line your CI calls:
+The runner itself is four lines, and it is the line your CI calls:
 
 ```python
 def run_standard(evidence: Dict[str, Any]) -> GateReport:
