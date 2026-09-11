@@ -7,7 +7,13 @@ mechanical, auditable contract on the wire: the model proposes, a strict
 schema constrains, and your code — not the model — decides what counts as a
 valid proposal. It also corrects a defect in the previous edition, which
 printed a hallucinated SDK method (`client.responses.create`). That method
-does not exist in `openai>=1.40`. This chapter uses the real one.
+did not exist when the previous edition was written — the Responses API
+only became real in 2025, so the old chapter's "live" listing would have
+crashed on first run. (It exists today, which is why the correction is
+load-bearing rather than archaeology: this chapter uses the Chat
+Completions structured-outputs interface — `chat.completions.create`
+with `response_format={"type": "json_schema", "strict": True}` —
+verified against the installed SDK satisfying `openai>=1.40`.)
 
 ---
 
@@ -78,11 +84,16 @@ the system prompt still carries the behavioral instruction ("never invent
 tickers") because strict mode guarantees *shape*, not *honesty* — the
 allowlist check in our code is what catches the invented ticker.
 
-Note what we do not do: we never call `client.responses.create`. If you
-remember that method from the previous edition, forget it — it was never a
-real SDK method, and the old chapter's "live" listing would have crashed on
-first run. This is exactly the class of defect this book's verification bar
-exists to prevent: every listing in this edition is executed in CI.
+Note what we do not do: we never call `client.responses.create`. That
+method did not exist when the previous edition was written — the
+Responses API arrived in 2025 — so the old chapter's "live" listing
+would have crashed on first run. (It is a real method today; this
+chapter stays on the Chat Completions interface deliberately, because
+it is the stable, long-supported structured-outputs path and the one
+this chapter's verification covers.) This is exactly the class of
+defect this book's verification bar exists to prevent: every listing in
+this edition is executed in CI, and the SDK surface it depends on is
+checked against the installed package.
 
 A fourth detail, operational rather than contractual: the first request
 carrying a novel strict schema pays a compilation penalty — the provider
@@ -432,7 +443,7 @@ ends at the proposal.
 
 ---
 
-**What this fixes:** the previous edition's hallucinated `client.responses.create` is replaced with the real `openai>=1.40` structured-outputs call, and every model response now passes a strict schema plus a universe allowlist before it can influence anything.
+**What this fixes:** the previous edition's hallucinated `client.responses.create` (written before the Responses API existed) is replaced with the real `openai>=1.40` Chat Completions structured-outputs call, and every model response now passes a strict schema plus a universe allowlist before it can influence anything.
 
 **Exercises:**
 
