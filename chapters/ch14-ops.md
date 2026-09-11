@@ -36,18 +36,26 @@ The core of the module — the producer's contract with the agent loop, and the 
         with self._seq_lock:
             seq = self._next_seq
             self._next_seq += 1
-        # put(block=True) is the backpressure: a full queue pauses the agent.
-        try:
-            self._queue.put((seq, session, event_type, dict(payload or {})),
-                            block=True, timeout=self._put_timeout)
-        except queue.Full:
-            # A full queue past put_timeout means the consumer is wedged; the
-            # agent must not proceed unverified. Loud failure, not silent loss.
-            with self._stats_lock:
-                self._backpressure_events += 1
-            raise EvidenceWriterDown(
-                f"evidence queue full for {self._put_timeout}s; refusing to "
-                f"run unverified")
+            # The put is INSIDE the sequence lock: insertion order matches
+            # sequence-acquisition order, so the single consumer's FIFO
+            # read is the submission order. Outside the lock, a thread
+            # holding an earlier sequence could be preempted and lose the
+            # queue race to a later one — out-of-order evidence, recorded
+            # permanently. (The cost: a full queue holds this lock for up
+            # to put_timeout. That is the backpressure working as designed:
+            # nobody submits while the agent is paused.)
+            try:
+                self._queue.put((seq, session, event_type, dict(payload or {})),
+                                block=True, timeout=self._put_timeout)
+            except queue.Full:
+                # A full queue past put_timeout means the consumer is
+                # wedged; the agent must not proceed unverified. Loud
+                # failure, not silent loss.
+                with self._stats_lock:
+                    self._backpressure_events += 1
+                raise EvidenceWriterDown(
+                    f"evidence queue full for {self._put_timeout}s; refusing to "
+                    f"run unverified")
         with self._stats_lock:
             self._submitted += 1
         return seq
@@ -85,7 +93,6 @@ The core of the module — the producer's contract with the agent loop, and the 
             raise EvidenceWriterDown(
                 "could not drain the evidence queue on shutdown; "
                 "refusing to exit with unverified actions outstanding")
-        self._stopping.set()
         self._queue.put(None)  # shutdown sentinel
         self._consumer.join(timeout=10.0)
 ```

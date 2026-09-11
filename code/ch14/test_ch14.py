@@ -395,3 +395,49 @@ def test_durable_double_acquire_while_live_conflicts():
     leases.acquire("run-9", "worker-1", ttl_s=60.0)
     with pytest.raises(LeaseConflict):
         leases.acquire("run-9", "worker-2", ttl_s=60.0)
+
+
+def test_concurrent_submits_preserve_fifo_order_despite_preemption():
+    # Regression: submit() once assigned the sequence number under the
+    # lock but performed the queue put outside it. A thread holding an
+    # earlier sequence could be preempted before its put, and a later
+    # thread's entry would be emitted first — out-of-order evidence,
+    # permanently recorded. The put must be inside the sequence lock.
+    emitted = []
+    assigned = []
+    assign_lock = threading.Lock()
+
+    class OrderRouter:
+        def emit(self, session, event_type, payload):
+            emitted.append(payload["n"])
+
+    def submit_n(n):
+        seq = writer.submit(SESSION, "e", {"n": n})
+        with assign_lock:
+            assigned.append((seq, n))
+
+    writer = TraceWriter(OrderRouter(), capacity=16)
+    real_put = writer._queue.put
+
+    def slow_first_put(item, *a, **k):
+        if item is not None and item[3].get("n") == 0:
+            # Preempt the n=0 submitter between number acquisition and
+            # insertion — the exact interleaving the lock placement
+            # must close.
+            time.sleep(0.5)
+        return real_put(item, *a, **k)
+
+    writer._queue.put = slow_first_put
+    t0 = threading.Thread(target=submit_n, args=(0,))
+    t1 = threading.Thread(target=submit_n, args=(1,))
+    t0.start()
+    time.sleep(0.2)  # let t0 acquire its sequence and enter the slow put
+    t1.start()
+    t1.join(timeout=10)
+    t0.join(timeout=10)
+    assert writer.flush(timeout=10.0)
+    writer.close()
+    # Emission order must match sequence-acquisition order, never the
+    # queue-race order.
+    expected = [n for _, n in sorted(assigned)]
+    assert emitted == expected
