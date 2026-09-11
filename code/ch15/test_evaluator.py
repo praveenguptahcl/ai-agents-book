@@ -424,11 +424,11 @@ def test_gate_blocks_blown_cost_budget():
     suite, preds = _suite(n_cases=4, n_pass=1)
     suite.add_judge(_stub_judge("j1", False))
     report = suite.run(preds, judge_on=["c0", "c1", "c2", "c3"])
-    # Judge verdicts all fail; the 1 grader success stands alone:
-    # 1 verified success at $0.08 total → $0.08 per success > $0.05 budget.
+    # Judge verdicts all fail, so case-level successes is 0.
+    # 0 verified successes at $0.08 total → inf cost per success > $0.05 budget.
     with pytest.raises(CostGateExceededError):
         report.check_gate([GateThreshold("cost_per_verified_success",
-                                         minimum=0.05)])
+                                         maximum=0.05)])
 
 
 def test_gate_rejects_unknown_metric():
@@ -455,3 +455,34 @@ def test_human_routed_cases_do_not_silently_score():
              .add_judge(_stub_judge("j2", False)))
     report = suite.run({"c0": {"a": 0}}, judge_on=["c0"])
     assert report.results == []
+
+
+def test_frozen_dataset_detects_provenance_relabeling():
+    # Regression: fingerprint() once hashed only id/inputs/expected, so a
+    # post-pinning provenance relabel (REAL -> SYNTHETIC or the reverse)
+    # passed verify() silently — breaking the book's provenance invariant
+    # and its train-on-test contamination audit.
+    ds = FrozenDataset("g", [_case("a")])
+    relabeled = EvalCase(case_id="a", inputs={"q": "x"},
+                         expected={"a": 1}, source="test",
+                         provenance="SYNTHETIC")
+    ds._cases["a"] = relabeled
+    with pytest.raises(DatasetTamperedError):
+        ds.verify()
+
+
+def test_report_aggregates_at_case_level_not_result_level():
+    # Regression: successes/pass_rate once counted every ScoreResult as an
+    # independent trial. Two graders scoring the same 2 cases produced
+    # n=4 and an artificially tight Wilson interval. The honest unit is
+    # the case: it succeeds only if ALL its evaluations pass.
+    cases = [EvalCase(f"c{i}", {"q": i}, {"a": i}) for i in range(2)]
+    ds = FrozenDataset("s", cases)
+    preds = {"c0": {"a": 0}, "c1": {"a": -1}}  # c0 passes, c1 fails
+    suite = (EvalSuite("s", ds)
+             .add_grader(ExactMatchGrader("exact", seed=1))
+             .add_grader(ExactMatchGrader("exact2", seed=2)))
+    report = suite.run(preds)
+    assert len(report.results) == 4  # 2 cases x 2 graders
+    assert report.successes == 1  # only c0, where BOTH graders passed
+    assert report.pass_rate == pytest.approx(0.5)  # 1/2 cases, not 2/4 results

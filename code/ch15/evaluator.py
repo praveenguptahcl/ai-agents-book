@@ -85,9 +85,16 @@ class EvalCase:
     provenance: str = "REAL"
 
     def fingerprint(self) -> str:
+        # source and provenance are IN the hash: a "helpful" relabeling
+        # of a case's provenance after pinning is tampering, and the
+        # frozen-dataset verification must fail loudly on it. The
+        # book's provenance invariant (REAL/SYNTHETIC on everything the
+        # agent is graded on) is only auditable if the labels are pinned.
         return content_hash({"id": self.case_id,
                              "inputs": dict(self.inputs),
-                             "expected": dict(self.expected)})
+                             "expected": dict(self.expected),
+                             "source": self.source,
+                             "provenance": self.provenance})
 
 
 class FrozenDataset:
@@ -472,7 +479,12 @@ def resolve_rate(results: Sequence[ScoreResult]) -> float:
 @dataclass(frozen=True)
 class GateThreshold:
     metric: str
-    minimum: float
+    # Floors and ceilings are different promises and get different names:
+    # a cost budget is a ceiling ("maximum"), never a "minimum" that reads
+    # as one. The gate maps each metric to its semantic field and refuses
+    # a threshold that names the wrong one.
+    minimum: float | None = None
+    maximum: float | None = None
     # Wilson lower bound (honest) or point estimate (lazy)? The gate is
     # honest by default: the LOWER bound of the interval must clear.
     use_wilson_lower: bool = True
@@ -486,13 +498,25 @@ class EvalReport:
 
     @property
     def successes(self) -> int:
-        return sum(1 for r in self.results if r.passed)
+        # CASE-level aggregation: one case, one trial. A case succeeds
+        # only if ALL of its evaluations pass (every grader, every
+        # judge). Counting each (case, grader) pair as an independent
+        # trial would inflate n, violate the binomial independence the
+        # Wilson interval assumes, and manufacture a tight interval
+        # that clears the gate dishonestly.
+        if not self.results:
+            return 0
+        cases = {r.case_id for r in self.results}
+        return sum(1 for cid in cases
+                   if all(r.passed for r in self.results
+                           if r.case_id == cid))
 
     @property
     def pass_rate(self) -> float:
-        if not self.results:
+        cases = {r.case_id for r in self.results}
+        if not cases:
             return 0.0
-        return self.successes / len(self.results)
+        return self.successes / len(cases)
 
     def check_gate(self, thresholds: Sequence[GateThreshold]) -> None:
         """The CI gate. A regression or a blown cost budget blocks the merge.
@@ -501,19 +525,25 @@ class EvalReport:
         proceed on an exception. "We'll fix the eval later" is how
         unverified systems ship.
         """
-        lo, _ = wilson_interval(self.successes, len(self.results)) \
-            if self.results else (0.0, 0.0)
+        cases = {r.case_id for r in self.results}
+        lo, _ = wilson_interval(self.successes, len(cases)) \
+            if cases else (0.0, 0.0)
         for t in thresholds:
             if t.metric == "pass_rate":
+                if t.minimum is None:
+                    raise EvalError("pass_rate gate requires a minimum")
                 value = lo if t.use_wilson_lower else self.pass_rate
                 if value < t.minimum:
                     raise RegressionError(
                         f"gate {t.metric}: {value:.3f} < {t.minimum:.3f}")
             elif t.metric == "cost_per_verified_success":
+                if t.maximum is None:
+                    raise EvalError(
+                        "cost_per_verified_success gate requires a maximum")
                 cpvs = self.ledger.cost_per_verified_success(self.successes)
-                if cpvs > t.minimum:  # "minimum" reads as the max allowed cost
+                if cpvs > t.maximum:
                     raise CostGateExceededError(
-                        f"gate {t.metric}: ${cpvs:.4f} > ${t.minimum:.4f}")
+                        f"gate {t.metric}: ${cpvs:.4f} > ${t.maximum:.4f}")
             else:
                 raise EvalError(f"unknown gate metric {t.metric!r}")
 

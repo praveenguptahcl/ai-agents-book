@@ -422,7 +422,11 @@ Three rules keep the gate honest over time:
 
 1. **The gate measures the lower bound.** Wilson lower, kappa threshold,
    cost ceiling — the pessimistic reading. Optimistic gates pass everything
-   and protect nothing.
+   and protect nothing. And the counting unit is the *case*, not the grade:
+   a case succeeds only if every grader and judge that scored it passed it.
+   Counting each (case, grader) pair as an independent trial inflates n,
+   breaks the binomial independence the Wilson interval assumes, and
+   manufactures a tight interval that clears the gate dishonestly.
 2. **Baselines are committed, not remembered.** The threshold lives in the
    repo next to the code it gates. A baseline that lives in someone's head
    gets renegotiated every quarter.
