@@ -120,7 +120,7 @@ def check_temporal_purity(
     says so instead of blessing it."""
     if not bars:
         raise WalkForwardError("purity check needs at least one bar")
-    targets = list(decision_bars) if decision_bars is not None else [len(bars) - 1]
+    targets = list(decision_bars) if decision_bars is not None else [max(0, len(bars) - 2)]
     notes: list[str] = []
     failed = False
     inconclusive = False
@@ -145,7 +145,7 @@ def check_temporal_purity(
 
 *(Verbatim from `code/ch16/walk_forward.py`.)*
 
-Three details deserve attention. First, the factory receives the full series *on purpose* — the check models the attacker's capability, then perturbs exactly what the attacker would have smuggled. An honest strategy ignores the argument and passes; the test suite's `PeekingMomentum`, which reads `self._full[t + 1].close`, fails loudly. Second, the determinism pre-check: two identical replays must agree before the perturbation means anything. A stochastic strategy gets INCONCLUSIVE — the check refuses to bless what it cannot see through, which is the honest-reporting discipline applied to the checker itself. Third, the perturbation is seeded and bounded (±5% by default): reproducible, and small enough that a decision genuinely based on bar-`t` information should not flip.
+Three details deserve attention. First, the factory receives the full series *on purpose* — the check models the attacker's capability, then perturbs exactly what the attacker would have smuggled. An honest strategy ignores the argument and passes; the test suite's `PeekingMomentum`, which reads `self._full[t + 1].close`, fails loudly. Second, the determinism pre-check: two identical replays must agree before the perturbation means anything. A stochastic strategy gets INCONCLUSIVE — the check refuses to bless what it cannot see through, which is the honest-reporting discipline applied to the checker itself. Third, the perturbation is seeded and bounded (±5% by default): reproducible, and small enough that a decision genuinely based on bar-`t` information should not flip. Fourth, the default target is the *second-to-last* bar, never the last: perturbation only touches bars *after* the decision bar, so targeting the final bar would leave nothing to perturb — the smuggled copy would be identical to the original, and the check would silently pass every cheater. A lie detector needs something to lie about.
 
 Run this check in CI on every strategy, every commit. It costs milliseconds. The lookahead bug it catches costs careers.
 

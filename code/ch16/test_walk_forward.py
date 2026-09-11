@@ -444,3 +444,24 @@ def test_fills_are_labeled_synthetic():
     assert result.n_fills > 0
     # fills are synthetic by construction (Fill.provenance defaults to SYNTHETIC)
     assert Fill.__dataclass_fields__["provenance"].default == "SYNTHETIC"
+
+
+def test_purity_check_default_target_is_not_a_noop():
+    # Regression: the default target was once [len(bars) - 1]. _perturb_future
+    # only modifies bars strictly AFTER after_t, so targeting the final bar
+    # left zero bars to perturb — the smuggled copy was identical to the
+    # original and the lie detector silently passed every cheater when
+    # decision_bars was omitted. The default must target a bar that HAS a
+    # future to perturb.
+    bars = make_bars(40, drift=0.5)
+    report = check_temporal_purity(lambda full: PeekingMomentum(full), bars)
+    assert report.passed is False
+    assert any("LOOKAHEAD" in n for n in report.notes)
+
+
+def test_purity_check_default_target_passes_honest_strategy():
+    # The fixed default must not manufacture false positives: an honest
+    # strategy still passes when decision_bars is omitted.
+    bars = make_bars(40, drift=0.5)
+    report = check_temporal_purity(lambda full: HonestMomentum(), bars)
+    assert report.passed is True
