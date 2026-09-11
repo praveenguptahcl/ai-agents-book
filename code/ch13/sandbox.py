@@ -245,7 +245,10 @@ class Sandbox:
         # each component of the relative path and refuse symlinks — a
         # symlinked directory would redirect the write outside the tree.
         probe = self._worktree
-        for part in relpath.split(os.sep):
+        # Diff headers use forward slashes even on Windows, so tokenize
+        # on "/" explicitly — os.sep would miss foo/bar.py on a Windows
+        # host and skip the symlink check below.
+        for part in relpath.replace("\\", "/").split("/"):
             if part in ("", ".", ".."):
                 raise PatchOutsideWorktree(
                     f"suspicious component {part!r} in {relpath!r}"
@@ -387,7 +390,11 @@ def _apply_file_patch(target: str, fp: FilePatch) -> None:
             current = fh.read().splitlines()
     else:
         current = []
-    for hunk in fp.hunks:
+    for hunk in reversed(fp.hunks):
+        # Bottom-to-top: hunk old_start values are relative to the
+        # ORIGINAL file, so applying the last hunk first keeps every
+        # index valid. Forward iteration corrupts offsets the moment an
+        # earlier hunk adds or removes lines.
         # old_start=0 means "new file": the hunk starts before line 1.
         idx = hunk.old_start - 1 if hunk.old_start > 0 else 0
         if idx < 0 or idx > len(current):

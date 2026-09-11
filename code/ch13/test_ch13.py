@@ -493,3 +493,50 @@ def test_automated_policy_refuses_oversize_patch(full_sandbox):
     proposed = full_sandbox.propose_patch(big)
     reviewed = proposed.review(automated_policy(max_additions=200))
     assert not reviewed.verdict.approved
+
+
+def test_multi_hunk_patch_applies_in_original_line_numbers(full_sandbox,
+                                                           worktree):
+    # Regression: _apply_file_patch once iterated hunks forward while
+    # mutating the line list, so a first hunk that added lines shifted
+    # every later hunk's old_start and valid diffs spuriously failed
+    # with PatchContextMismatch. Hunks now apply bottom-to-top.
+    target = os.path.join(worktree, "strategy.py")
+    with open(target, "w") as fh:
+        fh.write("line1\nline2\nline3\nline4\nline5\nline6\n")
+    two_hunk = """--- a/strategy.py
++++ b/strategy.py
+@@ -1,3 +1,4 @@
+ line1
+ line2
++inserted
+ line3
+@@ -4,3 +5,3 @@
+ line4
+-line5
++line5-changed
+ line6
+"""
+    proposed = full_sandbox.propose_patch(two_hunk)
+    reviewed = proposed.review(automated_policy())
+    assert reviewed.verdict.approved
+    full_sandbox.apply(reviewed)
+    with open(target) as fh:
+        content = fh.read()
+    assert content == ("line1\nline2\ninserted\nline3\nline4\n"
+                       "line5-changed\nline6\n")
+
+
+def test_redirect_hop_gate_failure_is_redirect_blocked_not_bare_ssrf():
+    # Regression: the redirect loop once pre-validated the next URL at
+    # the bottom of the loop and re-gated it at the top — a TOCTOU
+    # double-gate. A hop that fails the gate must surface as
+    # RedirectBlocked (the named refusal the trace promises), never a
+    # bare SSRFAddressBlocked from a second check.
+    b = make_boundary(
+        {"http://api.polygon.io/q": redirect_to("http://evil.com/steal")},
+        {"api.polygon.io": [PUBLIC_IP], "evil.com": ["127.0.0.1"]},
+    )
+    with pytest.raises(RedirectBlocked) as exc_info:
+        b.request("GET", "http://api.polygon.io/q")
+    assert "redirect hop" in str(exc_info.value)

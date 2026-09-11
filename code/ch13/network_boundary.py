@@ -250,8 +250,23 @@ class NetworkBoundary:
         hops: list[str] = []
         checked_ips: list[str] = []
         current = url
-        for _ in range(self._max_redirects + 1):
-            _, checked_url, ips = self._gate_one_url(current)
+        for step in range(self._max_redirects + 1):
+            # Gate exactly once per hop, at the top of the loop. A
+            # pre-validation of the next URL at the bottom of the loop
+            # would double-gate the same URL — a TOCTOU gap where a DNS
+            # rebind between the two checks surfaces a bare
+            # SSRFAddressBlocked instead of the RedirectBlocked the
+            # named-refusal trace promises. Redirect hops (step > 0)
+            # wrap gate failures as RedirectBlocked.
+            try:
+                _, checked_url, ips = self._gate_one_url(current)
+            except EgressError as exc:
+                if step > 0:
+                    raise RedirectBlocked(
+                        f"redirect hop {len(hops)} -> {current!r} "
+                        f"failed the gate: {exc}"
+                    ) from exc
+                raise
             hops.append(checked_url)
             checked_ips.extend(ips)
             resp = self._transport(method.upper(), checked_url, timeout)
@@ -270,12 +285,6 @@ class NetworkBoundary:
                     f"{checked_url} returned {resp.status_code} with no Location"
                 )
             nxt = urljoin(checked_url, location)
-            try:
-                self._gate_one_url(nxt)
-            except EgressError as exc:
-                raise RedirectBlocked(
-                    f"redirect hop {len(hops)} -> {nxt!r} failed the gate: {exc}"
-                ) from exc
             # 301/302/303 rewrite to GET per RFC 7231; 307/308 keep method.
             if resp.status_code in (301, 302, 303):
                 method = "GET"

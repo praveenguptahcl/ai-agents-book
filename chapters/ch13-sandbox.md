@@ -225,13 +225,41 @@ laundering paths before the attackers do.
 Redirects are followed by hand, and every hop is re-gated:
 
 ```python
-            nxt = urljoin(checked_url, location)
+        for step in range(self._max_redirects + 1):
+            # Gate exactly once per hop, at the top of the loop. A
+            # pre-validation of the next URL at the bottom of the loop
+            # would double-gate the same URL — a TOCTOU gap where a DNS
+            # rebind between the two checks surfaces a bare
+            # SSRFAddressBlocked instead of the RedirectBlocked the
+            # named-refusal trace promises. Redirect hops (step > 0)
+            # wrap gate failures as RedirectBlocked.
             try:
-                self._gate_one_url(nxt)
+                _, checked_url, ips = self._gate_one_url(current)
             except EgressError as exc:
+                if step > 0:
+                    raise RedirectBlocked(
+                        f"redirect hop {len(hops)} -> {current!r} "
+                        f"failed the gate: {exc}"
+                    ) from exc
+                raise
+            hops.append(checked_url)
+            checked_ips.extend(ips)
+            resp = self._transport(method.upper(), checked_url, timeout)
+            if resp.status_code not in _REDIRECT_STATUSES:
+                return GateVerdict(
+                    allowed=True,
+                    final_url=checked_url,
+                    status_code=resp.status_code,
+                    hops=tuple(hops),
+                    resolved_ips=tuple(checked_ips),
+                    response=resp,
+                )
+            location = resp.headers.get("location", "")
+            if not location:
                 raise RedirectBlocked(
-                    f"redirect hop {len(hops)} -> {nxt!r} failed the gate: {exc}"
-                ) from exc
+                    f"{checked_url} returned {resp.status_code} with no Location"
+                )
+            nxt = urljoin(checked_url, location)
             # 301/302/303 rewrite to GET per RFC 7231; 307/308 keep method.
             if resp.status_code in (301, 302, 303):
                 method = "GET"
@@ -241,13 +269,15 @@ Redirects are followed by hand, and every hop is re-gated:
         )
 ```
 
-The pre-check before following the hop exists so the error names the
-*redirect* as the failure, not the URL in isolation: `RedirectBlocked`
-tells the trace that a trusted hop laundered an untrusted one, which is
-a different incident — and a different response — than a direct fetch to
-a bad host. Timeouts, finally, are capped rather than honored: the agent
-may ask for less than the ceiling, never more. A tool that can set its
-own 24-hour timeout is a tool that can hold a connection — and a thread,
+The gate runs exactly once per hop, at the top of the loop — and a
+hop that fails it surfaces as `RedirectBlocked`, not as the bare
+`SSRFAddressBlocked` a double-gate would have produced. The error
+names the *redirect* as the failure, which is the point: a trusted
+hop laundering an untrusted one is a different incident — and a
+different response — than a direct fetch to a bad host. Timeouts,
+finally, are capped rather than honored: the agent may ask for less
+than the ceiling, never more. A tool that can set its own 24-hour
+timeout is a tool that can hold a connection — and a thread,
 and the operator's attention — hostage.
 
 ## 13.4 What the boundary cannot do
@@ -492,7 +522,10 @@ names the escape class, realpath containment as the backstop:
         # each component of the relative path and refuse symlinks — a
         # symlinked directory would redirect the write outside the tree.
         probe = self._worktree
-        for part in relpath.split(os.sep):
+        # Diff headers use forward slashes even on Windows, so tokenize
+        # on "/" explicitly — os.sep would miss foo/bar.py on a Windows
+        # host and skip the symlink check below.
+        for part in relpath.replace("\\", "/").split("/"):
             if part in ("", ".", ".."):
                 raise PatchOutsideWorktree(
                     f"suspicious component {part!r} in {relpath!r}"
