@@ -140,16 +140,23 @@ def test_dsr_survives_when_edge_is_overwhelming():
 
 
 def test_dsr_hand_worked_case_is_below_the_bar():
-    # Chapter hand example: 0.65 Sharpe, 5 years, K=250 -> DSR ~0.56,
-    # far below any sane 0.95 bar.
-    assert dsr_from_stats(0.65, 5.0, 0.5675, 0.0, 3.0) == pytest.approx(0.56, abs=0.02)
-    assert dsr_from_stats(0.65, 5.0, 0.5675, 0.0, 3.0) < 0.95
+    # Chapter hand example: 0.65 Sharpe, 5 years, K=250 -> DSR ~0.57,
+    # far below any sane 0.95 bar. Inputs are de-annualized to daily units
+    # (SR / sqrt(252), T = 5 * 252): the formula's moment penalties are only
+    # valid in the native observation frequency.
+    sr_period = 0.65 / math.sqrt(252.0)
+    sr_null_period = 0.5675 / math.sqrt(252.0)
+    assert dsr_from_stats(sr_period, 5 * 252, sr_null_period, 0.0, 3.0) == \
+        pytest.approx(0.57, abs=0.02)
+    assert dsr_from_stats(sr_period, 5 * 252, sr_null_period, 0.0, 3.0) < 0.95
 
 
 def test_dsr_hand_worked_survivor_clears_the_bar():
-    # The same setup with a 1.2 Sharpe over 20 years: DSR ~0.98. Note the
+    # The same setup with a 1.2 Sharpe over 20 years: DSR ~0.998. Note the
     # price of survival — the honest lesson of this chapter.
-    assert dsr_from_stats(1.2, 20.0, 0.5675, 0.0, 3.0) > 0.95
+    sr_period = 1.2 / math.sqrt(252.0)
+    sr_null_period = 0.5675 / math.sqrt(252.0)
+    assert dsr_from_stats(sr_period, 20 * 252, sr_null_period, 0.0, 3.0) > 0.95
 
 
 def test_dsr_needs_multiple_trials():
@@ -178,15 +185,17 @@ def test_bootstrap_is_deterministic_for_fixed_seed():
 # minTRL: short track records are rumors
 # ---------------------------------------------------------------------------
 def test_min_trl_hand_arithmetic():
-    # 0.8 vs benchmark 0.5, normal, alpha 0.05:
-    #   scale = 1 + (3-1)/4 * 0.5^2 = 1.125
-    #   minTRL = 1 + 1.125 * (1.6449/0.3)^2 ~= 34.82 -> ~35 observations.
-    assert min_trl(0.8, 0.5, 0.0, 3.0) == pytest.approx(34.82, abs=0.1)
+    # 0.8 vs benchmark 0.5, normal, alpha 0.05. The scale term uses the
+    # OBSERVED Sharpe (the standard error of the SR estimate is a function
+    # of the true SR, estimated by SR_hat):
+    #   scale = 1 + (3-1)/4 * 0.8^2 = 1.32
+    #   minTRL = 1 + 1.32 * (1.6449/0.3)^2 ~= 40.68 -> ~41 observations.
+    assert min_trl(0.8, 0.5, 0.0, 3.0) == pytest.approx(40.68, abs=0.1)
 
 
 def test_min_trl_explodes_for_thin_edges():
-    # Proving a 0.6 against a 0.5 benchmark needs ~306 observations.
-    assert min_trl(0.6, 0.5, 0.0, 3.0) == pytest.approx(305.37, abs=0.5)
+    # Proving a 0.6 against a 0.5 benchmark needs ~321 observations.
+    assert min_trl(0.6, 0.5, 0.0, 3.0) == pytest.approx(320.25, abs=0.5)
 
 
 def test_min_trl_rejects_observed_below_benchmark():

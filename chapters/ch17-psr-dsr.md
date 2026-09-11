@@ -39,8 +39,8 @@ Let us work one by hand, the way the chapter's code will do it. A strategy with 
 
 - Denominator: $1 - (-0.5)(0.5) + \frac{5-1}{4}(0.25) = 1 + 0.25 + 0.25 = 1.5$. So $\sqrt{1.5} \approx 1.2247$. Notice how the negative skew and fat tails each added 0.25 — the same 0.5 Sharpe with normal returns would have a denominator of $\sqrt{1.0625}$, earning noticeably more confidence.
 - Numerator: $(0.5 - 0)\sqrt{59} = 0.5 \times 7.6811 = 3.8406$.
-- z-statistic: $3.8406 / 1.2247 = 3.1362$.
-- $PSR = \Phi(3.1362) \approx 0.9991$.
+- z-statistic: $3.8406 / 1.2247 = 3.1358$ (the true value from unrounded inputs; the rounded intermediates give 3.1360, which is why you keep the full precision until the end).
+- $PSR = \Phi(3.1358) \approx 0.9991$.
 
 A 99.9% probability the true monthly Sharpe beats zero, *after* penalizing the ugly higher moments. That is a number you can take to an investment committee — unlike the bare "0.5" which tells you nothing about whether 60 months is enough.
 
@@ -91,13 +91,16 @@ def psr_from_stats(sr: float, benchmark_sr: float, n_obs: int,
     The probability that the true Sharpe ratio exceeds ``benchmark_sr``,
     corrected for sample length (T), skewness (g3), and kurtosis (g4).
 
-    Frequency discipline: ``sr`` and ``n_obs`` must be in the SAME frequency.
-    An annualized Sharpe goes with T in years; a monthly Sharpe goes with T
-    in months. Mixing them (annualized Sharpe, T in days) inflates the test
-    statistic by sqrt(periods_per_year) — the most common way smart people
-    accidentally manufacture significance. The returns-level ``psr()`` below
-    handles the conversion; call this function directly only when you have
-    already-consistent statistics.
+    Frequency discipline: sr, benchmark_sr, and n_obs must be in the NATIVE
+    observation frequency — the frequency of the returns the moments were
+    estimated from. Annualizing the Sharpe ratio scales it by sqrt(q), which
+    inappropriately inflates the skew and kurtosis penalties in the
+    denominator: the (g4-1)/4 * SR^2 term grows by a factor of q, so a
+    fat-tailed strategy looks far worse than its own data says it is. There
+    is no joint conversion that fixes this — the formula's standard error is
+    a function of SR itself, so the statistic is NOT frequency-invariant.
+    The returns-level ``psr()`` below handles de-annualizing the benchmark;
+    call this function directly only with already-native statistics.
     """
     if n_obs <= 1:
         raise ValueError(
@@ -112,17 +115,23 @@ def psr_from_stats(sr: float, benchmark_sr: float, n_obs: int,
 
 def psr(returns: np.ndarray, benchmark_sr: float = 0.0,
         periods_per_year: float = 252.0) -> float:
-    """PSR of a return series against an annualized benchmark Sharpe."""
+    """PSR of a return series against an annualized benchmark Sharpe.
+
+    Everything is evaluated in the NATIVE per-period frequency: the moments
+    come straight from the return series, and the (annualized) benchmark is
+    DE-annualized to per-period units. Annualizing the Sharpe instead would
+    inflate the skew/kurtosis penalties by sqrt(q) and q respectively —
+    manufacturing pessimism (or, in the numerator-only bug, significance)
+    out of a unit conversion.
+    """
     x = np.asarray(returns, dtype=float).ravel()
     mean, std, skew, kurt = sample_moments(x)
-    # Convert to annualized Sharpe AND years together: the statistic is
-    # invariant to frequency only when SR and T are converted jointly.
-    sr_annual = (mean / std) * math.sqrt(periods_per_year)
-    t_years = x.size / periods_per_year
-    return psr_from_stats(sr_annual, benchmark_sr, t_years, skew, kurt)
+    sr_period = mean / std
+    bench_period = benchmark_sr / math.sqrt(periods_per_year)
+    return psr_from_stats(sr_period, bench_period, x.size, skew, kurt)
 ```
 
-That "frequency discipline" paragraph in the docstring is not decoration. During development, the first version of `psr()` annualized the Sharpe but passed the raw day count as T — inflating every test statistic by $\sqrt{252} \approx 15.9$ and making pure noise look like a 99.99% certainty. The adversarial test suite caught it, because one of the tests asserts that PSR over many independent zero-edge streams averages ~0.5. (A single zero-edge stream gives a Uniform(0, 1) PSR — the only honest assertion is on the average, which is exactly the kind of thing a test-writer gets wrong on the first try, and exactly why the tests are written as adversaries rather than cheerleaders.) Mixing frequencies is the most common way smart people accidentally manufacture significance, and now the module refuses to let you do it silently: `psr()` converts Sharpe and T jointly, and `psr_from_stats()` documents the contract for direct callers. If you take one implementation lesson from this chapter, take this one: whenever a formula has a $T$ in it, ask what frequency it is in, out loud, before you trust the output.
+That "frequency discipline" paragraph in the docstring is not decoration, and the story behind it is worth telling honestly, because the first fix was wrong too. During development, the first version of `psr()` annualized the Sharpe but passed the raw day count as T — inflating every test statistic by $\sqrt{252} \approx 15.9$ and making pure noise look like a 99.99% certainty. The obvious repair was to convert Sharpe and T *jointly* — annualized Sharpe with T in years. That repair is still wrong, and more dangerously so, because it looks right: the numerator scales correctly, but the denominator's moment penalties do not. The $(g_4-1)/4 \cdot \hat{SR}^2$ term grows by a factor of $q$ under annualization, so a fat-tailed strategy is penalized far beyond what its own data warrants. The PSR's standard error is a function of the Sharpe ratio itself, which means the statistic is *not* frequency-invariant under any conversion — the only correct move is to evaluate everything in the native per-period frequency and de-annualize the benchmark into it. The adversarial test suite caught the first bug (one test asserts that PSR over many independent zero-edge streams averages ~0.5 — a single zero-edge stream gives a Uniform(0, 1) PSR, so the only honest assertion is on the average), and the math review caught the second. Whenever a formula has a $T$ in it, ask what frequency it is in, out loud, before you trust the output — and then check the terms that are *functions* of the estimated quantity, because those are where unit conversions go to lie.
 
 ## The Deflated Sharpe Ratio: multiplicity control
 
@@ -142,7 +151,7 @@ Work it by hand for the chapter's running example. $K = 250$ trials, trial-Sharp
 
 Read that number slowly. **You tried 250 things, and the null hypothesis — pure noise — expects your best Sharpe to be 0.57.** Your "0.6 Sharpe strategy, discovered after testing 250 candidates" is not a discovery. It is the expected value of trying.
 
-Then $DSR = PSR(SR_0)$: the same probability machinery, but the benchmark is the luck-adjusted bar, and the skew/kurtosis in the denominator come from the *cross-trial* distribution (how the 250 Sharpes scatter), not from the selected strategy's returns:
+Then $DSR = PSR(SR_0)$: the same probability machinery, but the benchmark is the luck-adjusted bar, and the skew/kurtosis in the denominator still come from the *selected strategy's returns* — because we are estimating the uncertainty of *its* track record. The cross-trial dispersion is already priced into the benchmark $SR_0$ through the trial variance $\hat{V}$; putting trial moments in the denominator too would be double-counting luck's shape as well as its size.
 
 ```python
 def expected_sharpe_null(n_trials: int, trial_sharpes: np.ndarray) -> float:
@@ -168,23 +177,20 @@ def expected_sharpe_null(n_trials: int, trial_sharpes: np.ndarray) -> float:
     return math.sqrt(var) * term
 ```
 
-The cross-trial moments come from `trial_moments` (skewness and Pearson kurtosis of the $K$ trial Sharpes — the dispersion the DSR listens to), and the verdict itself is one line:
+The verdict itself is one line, with the strategy's own moments in the denominator:
 
 ```python
-def trial_moments(trial_sharpes: np.ndarray) -> tuple[float, float]:
-    """Skewness and (non-excess) kurtosis of the cross-trial Sharpe distribution."""
-    trials = np.asarray(trial_sharpes, dtype=float).ravel()
-    std = float(np.std(trials, ddof=1))
-    if not std > 1e-12 * max(1.0, abs(float(np.mean(trials)))):
-        raise ValueError("trial Sharpes have (numerically) zero variance")
-    z = (trials - float(np.mean(trials))) / std
-    return float(np.mean(z ** 3)), float(np.mean(z ** 4))
-
-
 def dsr_from_stats(sr: float, n_obs: int, sr_null: float,
-                   trial_skew: float, trial_kurt: float) -> float:
-    """DSR = PSR(SR_0): the PSR evaluated at the multiplicity benchmark."""
-    return psr_from_stats(sr, sr_null, n_obs, trial_skew, trial_kurt)
+                   skew: float, kurt: float) -> float:
+    """DSR = PSR(SR_0): the PSR evaluated at the multiplicity benchmark.
+
+    ``skew``/``kurt`` are the SELECTED strategy's own return moments — the
+    denominator estimates the uncertainty of ITS track record, not the
+    dispersion of the trial Sharpes (that dispersion is already priced into
+    ``sr_null`` via the trial variance). Same native-frequency discipline
+    as PSR: sr, sr_null, and n_obs in one frequency.
+    """
+    return psr_from_stats(sr, sr_null, n_obs, skew, kurt)
 
 
 def dsr(returns: np.ndarray, trial_sharpes: np.ndarray,
@@ -196,38 +202,43 @@ def dsr(returns: np.ndarray, trial_sharpes: np.ndarray,
     """
     x = np.asarray(returns, dtype=float).ravel()
     trials = np.asarray(trial_sharpes, dtype=float).ravel()
-    mean, std, _, _ = sample_moments(x)
+    mean, std, skew_ret, kurt_ret = sample_moments(x)
     sr_annual = float((mean / std) * math.sqrt(periods_per_year))
-    t_years = x.size / periods_per_year
-    skew_t, kurt_t = trial_moments(trials)
-    sr_null = expected_sharpe_null(trials.size, trials)
-    value = dsr_from_stats(sr_annual, t_years, sr_null, skew_t, kurt_t)
+    sr_null_annual = expected_sharpe_null(trials.size, trials)
+
+    # Native frequency for the inference: the strategy's own per-period
+    # Sharpe, the null benchmark de-annualized to the same units, the raw
+    # observation count, and the strategy's OWN return skew/kurtosis.
+    sr_period = mean / std
+    sr_null_period = sr_null_annual / math.sqrt(periods_per_year)
+    value = dsr_from_stats(sr_period, x.size, sr_null_period,
+                           skew_ret, kurt_ret)
     return {
         "dsr": value,
         "sharpe_annual": sr_annual,
-        "sr_null": sr_null,
+        "sr_null": sr_null_annual,
         "n_trials": trials.size,
-        "n_obs_years": t_years,
-        "trial_skew": skew_t,
-        "trial_kurt": kurt_t,
+        "n_obs": x.size,
+        "skew": skew_ret,
+        "kurt": kurt_ret,
     }
 ```
 
-Note that `dsr()` returns the full ingredient list, not just the verdict. That is deliberate, and it is a Chapter 9 decision wearing Chapter 17 clothes: the audit trail must record *why* a strategy passed or failed — the null benchmark, the trial count, the cross-trial moments — so that a future investigator can re-derive the verdict instead of trusting it. A single number is a claim; the ingredients are evidence.
+Note that `dsr()` returns the full ingredient list, not just the verdict. That is deliberate, and it is a Chapter 9 decision wearing Chapter 17 clothes: the audit trail must record *why* a strategy passed or failed — the null benchmark, the trial count, the strategy's own higher moments — so that a future investigator can re-derive the verdict instead of trusting it. A single number is a claim; the ingredients are evidence.
 
-Now the two hand-worked verdicts. **The death.** A strategy with an annualized Sharpe of 0.65, observed over 5 years, selected from 250 trials with $SR_0 = 0.5675$ and normal cross-trial moments:
+Now the two hand-worked verdicts — with the inputs de-annualized to daily units, per the frequency discipline: $0.65/\sqrt{252} \approx 0.0409$, $SR_0 = 0.5675/\sqrt{252} \approx 0.0357$, $T = 5 \times 252 = 1260$ daily observations. **The death.** A strategy with an annualized Sharpe of 0.65, observed over 5 years, selected from 250 trials with $SR_0 = 0.5675$ and normal return moments:
 
-- Denominator: $\sqrt{1 + \frac{3-1}{4}(0.65^2)} = \sqrt{1.2113} \approx 1.1006$
-- Numerator: $(0.65 - 0.5675)\sqrt{4} = 0.0825 \times 2 = 0.165$
-- z = 0.1499 → **DSR ≈ 0.56**
+- Denominator: $\sqrt{1 + \frac{3-1}{4}(0.0409^2)} = \sqrt{1.0008} \approx 1.0004$
+- Numerator: $(0.0409 - 0.0357)\sqrt{1259} = 0.0052 \times 35.481 = 0.1845$
+- z = 0.184 → **DSR ≈ 0.57**
 
-A 0.65 Sharpe — respectable on any desk, the kind of number that survives every single-trial test you throw at it — is a *coin flip* once you admit the 250 tries. The code agrees: `dsr_from_stats(0.65, 5.0, 0.5675, 0.0, 3.0)` returns 0.5596.
+A 0.65 Sharpe — respectable on any desk, the kind of number that survives every single-trial test you throw at it — is a *coin flip* once you admit the 250 tries. The code agrees: `dsr_from_stats(0.0409, 1260, 0.0357, 0.0, 3.0)` returns 0.5731.
 
-**The survivor.** The same setup, but an annualized Sharpe of 1.2 sustained over 20 years:
+**The survivor.** The same setup, but an annualized Sharpe of 1.2 ($1.2/\sqrt{252} \approx 0.0756$) sustained over 20 years ($T = 5040$):
 
-- Denominator: $\sqrt{1 + 0.5(1.44)} = \sqrt{1.72} \approx 1.3114$
-- Numerator: $(1.2 - 0.5675)\sqrt{19} = 0.6325 \times 4.3589 = 2.757$
-- z = 2.102 → **DSR ≈ 0.98**
+- Denominator: $\sqrt{1 + 0.5(0.0756^2)} = \sqrt{1.0029} \approx 1.0014$
+- Numerator: $(0.0756 - 0.0357)\sqrt{5039} = 0.0399 \times 70.985 = 2.829$
+- z = 2.825 → **DSR ≈ 0.998**
 
 It survives — at the price of twenty years. That price *is* the lesson. Multiplicity control does not say good strategies don't exist; it says the evidence required to believe in one scales with how hard you looked. The fourteen intraday candidates from the opening story had Sharpes of 7 to 20 and PSRs above 0.95 — and died anyway, because their cross-trial dispersion pushed the null benchmark up and their effective track records were short. Dispersion is information. The DSR listens to it.
 
@@ -235,31 +246,38 @@ It survives — at the price of twenty years. That price *is* the lesson. Multip
 
 There is a companion question the PSR answers implicitly but `minTRL` answers explicitly: **how many observations do you need before a Sharpe estimate can clear significance at all?**
 
-$$minTRL = 1 + \left(1 - \gamma_3 SR^* + \frac{\gamma_4-1}{4}{SR^*}^2\right)\left(\frac{z_\alpha}{\hat{SR} - SR^*}\right)^2$$
+$$minTRL = 1 + \left(1 - \gamma_3 \hat{SR} + \frac{\gamma_4-1}{4}\hat{SR}^2\right)\left(\frac{z_\alpha}{\hat{SR} - SR^*}\right)^2$$
+
+Note the scale term: it uses the *observed* Sharpe $\hat{SR}$, not the benchmark. The standard error of the Sharpe estimate is a function of the true Sharpe, and $\hat{SR}$ is our estimate of it — plugging the benchmark in instead understates the higher-moment penalty exactly when the observed edge is large, which is precisely when you most need the answer to be honest.
 
 Work it. A strategy with Sharpe 0.8 against a benchmark of 0.5, normal returns, $\alpha = 0.05$ ($z = 1.6449$):
 
-- Scale: $1 + \frac{3-1}{4}(0.25) = 1.125$
+- Scale: $1 + \frac{3-1}{4}(0.64) = 1.32$
 - $(1.6449 / 0.3)^2 = 30.06$
-- $minTRL = 1 + 1.125 \times 30.06 = 34.82$ → **about 35 observations**
+- $minTRL = 1 + 1.32 \times 30.06 = 40.68$ → **about 41 observations**
 
-And a thinner edge — Sharpe 0.6 against the same 0.5 benchmark: $(1.6449/0.1)^2 = 270.57$, so $minTRL = 1 + 1.125 \times 270.57 = 305.4$ → **about 306 observations**. Proving a small edge takes roughly nine times the data of proving a moderate one. Most backtests die right here, before any fancy math: the track record is simply too short for the claimed edge, and no amount of clever statistics can fix a sample that small. If your track record is shorter than minTRL, your Sharpe ratio is a rumor.
+And a thinner edge — Sharpe 0.6 against the same 0.5 benchmark: scale $= 1 + 0.5(0.36) = 1.18$, $(1.6449/0.1)^2 = 270.57$, so $minTRL = 1 + 1.18 \times 270.57 = 320.25$ → **about 321 observations**. Proving a small edge takes roughly eight times the data of proving a moderate one. Most backtests die right here, before any fancy math: the track record is simply too short for the claimed edge, and no amount of clever statistics can fix a sample that small. If your track record is shorter than minTRL, your Sharpe ratio is a rumor.
 
 ```python
 def min_trl(observed_sr: float, benchmark_sr: float,
             skew: float, kurt: float, alpha: float = 0.05) -> float:
     """How many observations before an SR estimate can clear significance.
 
-        minTRL = 1 + (1 - g3*SR* + (g4-1)/4 * SR*^2) * (z_alpha / (SR_hat - SR*))^2
+        minTRL = 1 + (1 - g3*SR_hat + (g4-1)/4 * SR_hat^2)
+                   * (z_alpha / (SR_hat - SR*))^2
 
-    If your track record is shorter than this, your Sharpe ratio is a rumor.
+    The scale term uses the OBSERVED Sharpe: the standard error of the SR
+    estimate is a function of the true SR, and SR_hat is our estimate of it.
+    Using the benchmark there instead understates the penalty exactly when
+    the observed edge is large. If your track record is shorter than this,
+    your Sharpe ratio is a rumor.
     """
     if observed_sr <= benchmark_sr:
         raise ValueError("observed Sharpe must exceed the benchmark")
     if not 0.0 < alpha < 1.0:
         raise ValueError(f"alpha must lie in (0, 1); got {alpha!r}")
     z = norm_ppf(1.0 - alpha)
-    scale = 1.0 - skew * benchmark_sr + (kurt - 1.0) / 4.0 * benchmark_sr ** 2
+    scale = 1.0 - skew * observed_sr + (kurt - 1.0) / 4.0 * observed_sr ** 2
     return 1.0 + scale * (z / (observed_sr - benchmark_sr)) ** 2
 ```
 

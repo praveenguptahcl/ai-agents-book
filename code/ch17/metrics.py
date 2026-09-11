@@ -114,13 +114,16 @@ def psr_from_stats(sr: float, benchmark_sr: float, n_obs: int,
     The probability that the true Sharpe ratio exceeds ``benchmark_sr``,
     corrected for sample length (T), skewness (g3), and kurtosis (g4).
 
-    Frequency discipline: ``sr`` and ``n_obs`` must be in the SAME frequency.
-    An annualized Sharpe goes with T in years; a monthly Sharpe goes with T
-    in months. Mixing them (annualized Sharpe, T in days) inflates the test
-    statistic by sqrt(periods_per_year) — the most common way smart people
-    accidentally manufacture significance. The returns-level ``psr()`` below
-    handles the conversion; call this function directly only when you have
-    already-consistent statistics.
+    Frequency discipline: sr, benchmark_sr, and n_obs must be in the NATIVE
+    observation frequency — the frequency of the returns the moments were
+    estimated from. Annualizing the Sharpe ratio scales it by sqrt(q), which
+    inappropriately inflates the skew and kurtosis penalties in the
+    denominator: the (g4-1)/4 * SR^2 term grows by a factor of q, so a
+    fat-tailed strategy looks far worse than its own data says it is. There
+    is no joint conversion that fixes this — the formula's standard error is
+    a function of SR itself, so the statistic is NOT frequency-invariant.
+    The returns-level ``psr()`` below handles de-annualizing the benchmark;
+    call this function directly only with already-native statistics.
     """
     if n_obs <= 1:
         raise ValueError(
@@ -135,14 +138,20 @@ def psr_from_stats(sr: float, benchmark_sr: float, n_obs: int,
 
 def psr(returns: np.ndarray, benchmark_sr: float = 0.0,
         periods_per_year: float = 252.0) -> float:
-    """PSR of a return series against an annualized benchmark Sharpe."""
+    """PSR of a return series against an annualized benchmark Sharpe.
+
+    Everything is evaluated in the NATIVE per-period frequency: the moments
+    come straight from the return series, and the (annualized) benchmark is
+    DE-annualized to per-period units. Annualizing the Sharpe instead would
+    inflate the skew/kurtosis penalties by sqrt(q) and q respectively —
+    manufacturing pessimism (or, in the numerator-only bug, significance)
+    out of a unit conversion.
+    """
     x = np.asarray(returns, dtype=float).ravel()
     mean, std, skew, kurt = sample_moments(x)
-    # Convert to annualized Sharpe AND years together: the statistic is
-    # invariant to frequency only when SR and T are converted jointly.
-    sr_annual = (mean / std) * math.sqrt(periods_per_year)
-    t_years = x.size / periods_per_year
-    return psr_from_stats(sr_annual, benchmark_sr, t_years, skew, kurt)
+    sr_period = mean / std
+    bench_period = benchmark_sr / math.sqrt(periods_per_year)
+    return psr_from_stats(sr_period, bench_period, x.size, skew, kurt)
 
 
 # ---------------------------------------------------------------------------
@@ -171,20 +180,17 @@ def expected_sharpe_null(n_trials: int, trial_sharpes: np.ndarray) -> float:
     return math.sqrt(var) * term
 
 
-def trial_moments(trial_sharpes: np.ndarray) -> tuple[float, float]:
-    """Skewness and (non-excess) kurtosis of the cross-trial Sharpe distribution."""
-    trials = np.asarray(trial_sharpes, dtype=float).ravel()
-    std = float(np.std(trials, ddof=1))
-    if not std > 1e-12 * max(1.0, abs(float(np.mean(trials)))):
-        raise ValueError("trial Sharpes have (numerically) zero variance")
-    z = (trials - float(np.mean(trials))) / std
-    return float(np.mean(z ** 3)), float(np.mean(z ** 4))
-
-
 def dsr_from_stats(sr: float, n_obs: int, sr_null: float,
-                   trial_skew: float, trial_kurt: float) -> float:
-    """DSR = PSR(SR_0): the PSR evaluated at the multiplicity benchmark."""
-    return psr_from_stats(sr, sr_null, n_obs, trial_skew, trial_kurt)
+                   skew: float, kurt: float) -> float:
+    """DSR = PSR(SR_0): the PSR evaluated at the multiplicity benchmark.
+
+    ``skew``/``kurt`` are the SELECTED strategy's own return moments — the
+    denominator estimates the uncertainty of ITS track record, not the
+    dispersion of the trial Sharpes (that dispersion is already priced into
+    ``sr_null`` via the trial variance). Same native-frequency discipline
+    as PSR: sr, sr_null, and n_obs in one frequency.
+    """
+    return psr_from_stats(sr, sr_null, n_obs, skew, kurt)
 
 
 def dsr(returns: np.ndarray, trial_sharpes: np.ndarray,
@@ -196,20 +202,25 @@ def dsr(returns: np.ndarray, trial_sharpes: np.ndarray,
     """
     x = np.asarray(returns, dtype=float).ravel()
     trials = np.asarray(trial_sharpes, dtype=float).ravel()
-    mean, std, _, _ = sample_moments(x)
+    mean, std, skew_ret, kurt_ret = sample_moments(x)
     sr_annual = float((mean / std) * math.sqrt(periods_per_year))
-    t_years = x.size / periods_per_year
-    skew_t, kurt_t = trial_moments(trials)
-    sr_null = expected_sharpe_null(trials.size, trials)
-    value = dsr_from_stats(sr_annual, t_years, sr_null, skew_t, kurt_t)
+    sr_null_annual = expected_sharpe_null(trials.size, trials)
+
+    # Native frequency for the inference: the strategy's own per-period
+    # Sharpe, the null benchmark de-annualized to the same units, the raw
+    # observation count, and the strategy's OWN return skew/kurtosis.
+    sr_period = mean / std
+    sr_null_period = sr_null_annual / math.sqrt(periods_per_year)
+    value = dsr_from_stats(sr_period, x.size, sr_null_period,
+                           skew_ret, kurt_ret)
     return {
         "dsr": value,
         "sharpe_annual": sr_annual,
-        "sr_null": sr_null,
+        "sr_null": sr_null_annual,
         "n_trials": trials.size,
-        "n_obs_years": t_years,
-        "trial_skew": skew_t,
-        "trial_kurt": kurt_t,
+        "n_obs": x.size,
+        "skew": skew_ret,
+        "kurt": kurt_ret,
     }
 
 
@@ -220,16 +231,21 @@ def min_trl(observed_sr: float, benchmark_sr: float,
             skew: float, kurt: float, alpha: float = 0.05) -> float:
     """How many observations before an SR estimate can clear significance.
 
-        minTRL = 1 + (1 - g3*SR* + (g4-1)/4 * SR*^2) * (z_alpha / (SR_hat - SR*))^2
+        minTRL = 1 + (1 - g3*SR_hat + (g4-1)/4 * SR_hat^2)
+                   * (z_alpha / (SR_hat - SR*))^2
 
-    If your track record is shorter than this, your Sharpe ratio is a rumor.
+    The scale term uses the OBSERVED Sharpe: the standard error of the SR
+    estimate is a function of the true SR, and SR_hat is our estimate of it.
+    Using the benchmark there instead understates the penalty exactly when
+    the observed edge is large. If your track record is shorter than this,
+    your Sharpe ratio is a rumor.
     """
     if observed_sr <= benchmark_sr:
         raise ValueError("observed Sharpe must exceed the benchmark")
     if not 0.0 < alpha < 1.0:
         raise ValueError(f"alpha must lie in (0, 1); got {alpha!r}")
     z = norm_ppf(1.0 - alpha)
-    scale = 1.0 - skew * benchmark_sr + (kurt - 1.0) / 4.0 * benchmark_sr ** 2
+    scale = 1.0 - skew * observed_sr + (kurt - 1.0) / 4.0 * observed_sr ** 2
     return 1.0 + scale * (z / (observed_sr - benchmark_sr)) ** 2
 
 
