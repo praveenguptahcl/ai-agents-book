@@ -47,8 +47,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 #: hallucinated symbol and must fail at the contract gate.
 ALLOWED_SYMBOLS = frozenset({"AAPL", "MSFT", "NVDA", "SPY", "QQQ", "AMD"})
 
-#: Hard guardrails, paper dollars. A single proposal may not command more
-#: than this notional. Ten million shares of SPY is not a typo the schema
+#: Hard guardrails, paper dollars. A single proposal may not commit more
+#: than this capital. A $5.9B allocation to SPY is not a typo the schema
 #: can catch — it is a judgment the contract must make.
 MAX_NOTIONAL = 25_000.0
 
@@ -71,18 +71,18 @@ SIGNAL_JSON_SCHEMA = {
             "proposal_id",
             "symbol",
             "side",
-            "qty",
+            "capital",
             "confidence",
-            "reference_price",
             "rationale",
         ],
         "properties": {
             "proposal_id": {"type": "string"},
             "symbol": {"type": "string"},
-            "side": {"type": "string", "enum": ["buy", "sell", "hold"]},
-            "qty": {"type": "number"},
+            # Intentions, not orders: long/short/flat. An order verb here
+            # is a vocabulary failure and dies at the schema.
+            "side": {"type": "string", "enum": ["long", "short", "flat"]},
+            "capital": {"type": "number"},
             "confidence": {"type": "number"},
-            "reference_price": {"type": "number"},
             "rationale": {"type": "string"},
         },
     },
@@ -100,7 +100,7 @@ REASON_CODES = frozenset(
 )
 
 Decision = Literal["accepted", "rejected"]
-Verdict = tuple[Decision, "str | None"]
+Verdict = tuple[Decision, str | None]
 
 
 # ---------------------------------------------------------------------------
@@ -117,10 +117,11 @@ class SignalProposal(BaseModel):
 
     proposal_id: str = Field(min_length=8, max_length=64)
     symbol: str
-    side: Literal["buy", "sell", "hold"]
-    qty: float = Field(gt=0)
+    # An intention, not an order: long/short/flat with a capital
+    # commitment. The strategy never touches orders — the executor does.
+    side: Literal["long", "short", "flat"]
+    capital: float = Field(gt=0)
     confidence: float = Field(ge=0, le=1)
-    reference_price: float = Field(gt=0)
     rationale: str = Field(min_length=1, max_length=2000)
 
     @field_validator("symbol")
@@ -132,12 +133,11 @@ class SignalProposal(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def notional_must_fit_the_cap(self) -> "SignalProposal":
-        notional = self.qty * self.reference_price
-        if notional > MAX_NOTIONAL:
+    def capital_must_fit_the_cap(self) -> "SignalProposal":
+        if self.capital > MAX_NOTIONAL:
             raise ValueError(
-                f"notional ${notional:,.0f} exceeds the ${MAX_NOTIONAL:,.0f} cap "
-                f"({self.qty:g} x ${self.reference_price:g})"
+                f"capital ${self.capital:,.0f} exceeds the "
+                f"${MAX_NOTIONAL:,.0f} cap"
             )
         return self
 
@@ -153,23 +153,22 @@ class SignalProposal(BaseModel):
 def erratic_llm_responses() -> list[tuple[str, str]]:
     """(case_name, raw_model_output) pairs. One valid; eight hostile."""
     dup = (
-        '{"proposal_id": "sig-0008-deadbeef", "symbol": "QQQ", "side": "hold", '
-        '"qty": 1, "confidence": 0.51, "reference_price": 540.0, '
+        '{"proposal_id": "sig-0008-deadbeef", "symbol": "QQQ", "side": "flat", '
+        '"capital": 5000.0, "confidence": 0.51, '
         '"rationale": "no edge; sitting out"}'
     )
     return [
         (
             "valid",
             '{"proposal_id": "sig-0001-deadbeef", "symbol": "AAPL", '
-            '"side": "buy", "qty": 10, "confidence": 0.72, '
-            '"reference_price": 232.50, '
+            '"side": "long", "capital": 10000.0, "confidence": 0.72, '
             '"rationale": "momentum continuation, volume confirms"}',
         ),
         (
             # The schema's required list catches this: no "side".
             "missing_field",
             '{"proposal_id": "sig-0002-deadbeef", "symbol": "MSFT", '
-            '"qty": 10, "confidence": 0.60, "reference_price": 512.00, '
+            '"capital": 10000.0, "confidence": 0.60, '
             '"rationale": "forgot the side entirely"}',
         ),
         (
@@ -177,40 +176,42 @@ def erratic_llm_responses() -> list[tuple[str, str]]:
             # The contract gate must kill it: confidence 1.7 is not a belief.
             "confidence_out_of_range",
             '{"proposal_id": "sig-0003-deadbeef", "symbol": "NVDA", '
-            '"side": "sell", "qty": 5, "confidence": 1.7, '
-            '"reference_price": 188.00, "rationale": "extremely sure"}',
+            '"side": "short", "capital": 5000.0, "confidence": 1.7, '
+            '"rationale": "extremely sure"}',
         ),
         (
             # Fail-plausible, the Ch 5 canonical: crisp rationale, invented
             # sixth ticker. The allowlist is the only layer that knows.
             "unknown_symbol",
             '{"proposal_id": "sig-0004-deadbeef", "symbol": "GME", '
-            '"side": "buy", "qty": 10, "confidence": 0.80, '
-            '"reference_price": 24.00, "rationale": "meme momentum"}',
+            '"side": "long", "capital": 10000.0, "confidence": 0.80, '
+            '"rationale": "meme momentum"}',
         ),
         (
-            # Closed enum: "long" is not a side. Shape failure, not judgment.
+            # Closed enum: "buy" is an order verb, not an intention.
+            # Shape failure, not judgment — the signal may never speak
+            # orders.
             "invalid_side",
             '{"proposal_id": "sig-0005-deadbeef", "symbol": "SPY", '
-            '"side": "long", "qty": 10, "confidence": 0.50, '
-            '"reference_price": 590.00, "rationale": "wrong vocabulary"}',
+            '"side": "buy", "capital": 10000.0, "confidence": 0.50, '
+            '"rationale": "wrong vocabulary"}',
         ),
         (
             # Truncated mid-rationale. Parse dies first; nothing downstream
             # ever sees it.
             "malformed_json",
             '{"proposal_id": "sig-0006-deadbeef", "symbol": "QQQ", '
-            '"side": "buy", "qty": 10, "confidence": 0.66, '
-            '"reference_price": 540.00, "rationale": "trunca',
+            '"side": "long", "capital": 10000.0, "confidence": 0.66, '
+            '"rationale": "trunca',
         ),
         (
             # THE Ch 2 lesson: structurally valid, semantically absurd.
-            # Every shape check passes. Ten million shares of SPY is a
-            # $5.9B proposal against a $25k cap. Only the contract knows.
+            # Every shape check passes. A $5.9B capital allocation to SPY
+            # against a $25k cap. Only the contract knows.
             "absurd_size",
             '{"proposal_id": "sig-0007-deadbeef", "symbol": "SPY", '
-            '"side": "buy", "qty": 10000000, "confidence": 0.90, '
-            '"reference_price": 590.00, "rationale": "sizing up"}',
+            '"side": "long", "capital": 5900000000.0, "confidence": 0.90, '
+            '"rationale": "sizing up"}',
         ),
         ("duplicate_first", dup),
         # Same proposal_id as duplicate_first: a retry, or a replay.
@@ -304,9 +305,9 @@ def test_malformed_json_rejected(pipeline: SignalPipeline) -> None:
 def test_absurd_size_rejected_at_contract_gate(
     pipeline: SignalPipeline,
 ) -> None:
-    # Ten million shares of SPY is perfectly shaped JSON. Every shape check
-    # passes. The rejection must come from the contract's notional cap —
-    # this is the Chapter 2 lesson wearing a lab coat.
+    # A $5.9B capital allocation to SPY is perfectly shaped JSON. Every
+    # shape check passes. The rejection must come from the contract's
+    # capital cap — this is the Chapter 2 lesson wearing a lab coat.
     decision, reason = pipeline.process(_case("absurd_size"))
     assert decision == "rejected"
     assert reason == "CONTRACT_VIOLATION"

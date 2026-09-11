@@ -25,7 +25,7 @@ lab.
 Chapter 5 taught the wire: the model emits proposals through a strict JSON
 schema, and strict mode guarantees *shape* — fields, types, closed enums.
 Chapter 4 taught the gate: a Pydantic contract that guarantees *judgment* —
-ranges, the universe allowlist, the notional cap. Neither layer trusts the
+ranges, the universe allowlist, the capital cap. Neither layer trusts the
 other, and both must pass.
 
 The lab makes the split concrete, because the split is where the teaching
@@ -42,9 +42,9 @@ The pipeline you build has four stages, in this order:
 1. **Parse** — the raw string as JSON. Truncated output dies here, before
    anything downstream ever sees it.
 2. **Schema-check** — against `SIGNAL_JSON_SCHEMA`: required fields, types,
-   the closed `buy`/`sell`/`hold` enum. Failure is `SCHEMA_VIOLATION`.
+   the closed `long`/`short`/`flat` enum. Failure is `SCHEMA_VIOLATION`.
 3. **Contract-gate** — through `SignalProposal`: confidence in [0, 1], the
-   symbol allowlist, the $25,000 notional cap. Failure is
+   symbol allowlist, the $25,000 capital cap. Failure is
    `CONTRACT_VIOLATION`.
 4. **Dedupe** — on `proposal_id`. Seen before means a retry or a replay, and
    the pipeline treats both identically: accepted exactly once, then
@@ -68,9 +68,9 @@ One is valid. Eight are hostile in eight different ways:
 | `missing_field` | No `side` at all | Schema |
 | `confidence_out_of_range` | Confidence 1.7 | Contract (the schema *passes* it) |
 | `unknown_symbol` | `GME` — crisp rationale, invented ticker | Contract (the allowlist) |
-| `invalid_side` | `"side": "long"` | Schema (closed enum) |
+| `invalid_side` | `"side": "buy"` (an order verb, not an intention) | Schema (closed enum) |
 | `malformed_json` | Truncated mid-rationale | Parse |
-| `absurd_size` | 10,000,000 shares of SPY | Contract (the notional cap) |
+| `absurd_size` | $5.9B capital allocation to SPY | Contract (the capital cap) |
 | `duplicate_first` / `duplicate_second` | Same `proposal_id` twice | Dedupe |
 
 Read the `unknown_symbol` case twice. It is Chapter 5's canonical
@@ -82,7 +82,7 @@ instruction.
 
 And read `absurd_size` three times. It is the Chapter 2 lesson wearing a lab
 coat: structurally valid, semantically absurd. Every shape check passes.
-Ten million shares of SPY is a $5.9 billion proposal against a $25,000 cap.
+A $5.9 billion capital allocation to SPY against a $25,000 cap.
 The schema cannot express "that number is insane" — no schema can, because
 insanity is domain knowledge. The contract can, because the contract *is*
 domain knowledge written as code. This is the case the whole lab exists for:
@@ -96,16 +96,16 @@ runs it every morning. The research agent emits this at 9:31 a.m. (JSON
 shown with line breaks added; content identical to the fixture):
 
 ```json
-{"proposal_id": "sig-0001-deadbeef", "symbol": "AAPL", "side": "buy",
- "qty": 10, "confidence": 0.72, "reference_price": 232.50,
+{"proposal_id": "sig-0001-deadbeef", "symbol": "AAPL", "side": "long",
+ "capital": 10000.0, "confidence": 0.72,
  "rationale": "momentum continuation, volume confirms"}
 ```
 
 **Parse** reads it as JSON — no truncation, no surprises. **Schema-check**
-walks the required list: all seven fields present, types correct, `side` a
+walks the required list: all six fields present, types correct, `side` a
 member of the closed enum. **Contract-gate** takes over where shape ends:
 confidence 0.72 is inside [0, 1], `AAPL` uppercases onto the allowlist, and
-the notional — 10 × $232.50 = $2,325 — fits comfortably under the $25,000
+the $10,000 capital commitment fits comfortably under the $25,000
 cap. **Dedupe** checks `sig-0001-deadbeef` against the seen set: new. The
 verdict is `("accepted", None)`, and the proposal continues to the executor
 with its papers stamped at every stage. Total cost: under a millisecond, in
@@ -114,13 +114,13 @@ Python, before any network call exists — Chapter 4's latency budget, honored.
 Now the hostile one, from the same morning:
 
 ```json
-{"proposal_id": "sig-0004-deadbeef", "symbol": "GME", "side": "buy",
- "qty": 10, "confidence": 0.80, "reference_price": 24.00,
+{"proposal_id": "sig-0004-deadbeef", "symbol": "GME", "side": "long",
+ "capital": 10000.0, "confidence": 0.80,
  "rationale": "meme momentum"}
 ```
 
 Parse succeeds. Schema-check succeeds — every required field is present,
-every type correct, `buy` is a valid enum member. The shape is immaculate.
+every type correct, `long` is a valid enum member. The shape is immaculate.
 Then the contract gate uppercases `GME`, checks the allowlist, and refuses:
 `CONTRACT_VIOLATION`. The rationale was crisp. The JSON was perfect. The
 ticker was invented, and the only layer that knew was the one written as
@@ -151,10 +151,11 @@ class SignalProposal(BaseModel):
 
     proposal_id: str = Field(min_length=8, max_length=64)
     symbol: str
-    side: Literal["buy", "sell", "hold"]
-    qty: float = Field(gt=0)
+    # An intention, not an order: long/short/flat with a capital
+    # commitment. The strategy never touches orders — the executor does.
+    side: Literal["long", "short", "flat"]
+    capital: float = Field(gt=0)
     confidence: float = Field(ge=0, le=1)
-    reference_price: float = Field(gt=0)
     rationale: str = Field(min_length=1, max_length=2000)
 
     @field_validator("symbol")
@@ -166,21 +167,19 @@ class SignalProposal(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def notional_must_fit_the_cap(self) -> "SignalProposal":
-        notional = self.qty * self.reference_price
-        if notional > MAX_NOTIONAL:
+    def capital_must_fit_the_cap(self) -> "SignalProposal":
+        if self.capital > MAX_NOTIONAL:
             raise ValueError(
-                f"notional ${notional:,.0f} exceeds the ${MAX_NOTIONAL:,.0f} cap "
-                f"({self.qty:g} x ${self.reference_price:g})"
+                f"capital ${self.capital:,.0f} exceeds the "
+                f"${MAX_NOTIONAL:,.0f} cap"
             )
         return self
 ```
 
 Note `extra="forbid"` — the closed world stays closed — and note that the
-notional check is a *model* validator, because "ten million times five
-hundred ninety" is a fact about the whole proposal, not about any one field.
-Field validators check papers; model validators check the story the papers
-tell together.
+capital check is a *model* validator, because the cap is a *judgment* about
+the proposal as a whole, not a property of any one field. Field validators
+check papers; model validators check the story the papers tell together.
 
 ## 21.5 What you build
 
@@ -216,8 +215,7 @@ instances — except the duplicate test, which processes twice through one
 instance. Think about what that implies for a production deployment before
 you dismiss it as test mechanics.
 
-Think about what that implies for a production deployment before
-you dismiss it as test mechanics. The lab's `_seen_ids` lives in process
+The lab's `_seen_ids` lives in process
 memory: restart the pipeline and it forgets every id it ever saw, and a
 replayed proposal sails through dedupe a second time. The lab-scale answer
 is fine for the lab. The production answer is the durable ledger from
@@ -249,7 +247,7 @@ teaches the habit; the later chapters teach the durability.
 ## 21.7 Rules of engagement
 
 Paper only — the lab's universe is the paper account's six symbols, and the
-notional cap is paper dollars. The fixture is deterministic; if you add your
+capital cap is paper dollars. The fixture is deterministic; if you add your
 own adversarial cases (you should), keep them deterministic too. And when
 you are done, notice what you built: a four-stage pipeline that stands
 between an enthusiastic model and real money, in which every refusal has a
